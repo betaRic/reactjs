@@ -50,6 +50,12 @@ BLOB_READ_WRITE_TOKEN
 
 The secure server workflow prepares the selected template on every photo, uploads each photo as unpublished media, then creates one multi-photo Page feed post. A photo My Day/Story uses the first campaign photo in a generated 1080 × 1920 layout. Video campaigns use one MP4, MOV, or WebM file and can publish to the Page Feed, My Day, or both.
 
+### Photo editing and event overlays
+
+Every uploaded photo has non-destructive editing controls for zoom, horizontal and vertical crop position, 90-degree rotation, and reset. The photo editor and Facebook preview render the actual final composition in real time while keeping the selected brand template unchanged.
+
+Photo campaigns can also enable a shared event-information banner. The event title, date, and location are applied consistently to every campaign photo and can be placed at the top or bottom, aligned left, center, or right. When the event title is blank, the campaign title is used automatically.
+
 ### Enable video uploads
 
 In Vercel, open **Storage**, create a **Blob** store, choose **Public**, and connect it to this project. Vercel adds `BLOB_READ_WRITE_TOKEN` to the project automatically; redeploy after connecting the store. Videos upload directly from the browser to Blob instead of passing through a Vercel Function, so files up to the composer’s 500 MB limit are supported.

@@ -15,6 +15,7 @@ import {
   ChevronRight,
   CircleDashed,
   Clock3,
+  Crop,
   Download,
   CloudUpload,
   ExternalLink,
@@ -31,6 +32,9 @@ import {
   MoreHorizontal,
   PencilLine,
   Plus,
+  RefreshCcw,
+  RotateCcw,
+  RotateCw,
   Search,
   Send,
   Settings,
@@ -68,6 +72,10 @@ const navigation = [
 
 const campaignFilters = ["All", "Draft", "Ready for review", "Scheduled", "Published"];
 const PUBLISH_KEY_STORAGE = "dilg-social-studio:publish-key";
+const DEFAULT_PHOTO_EDIT = { zoom: 1, positionX: 50, positionY: 50, rotation: 0 };
+const DEFAULT_EVENT_OVERLAY = { enabled: false, title: "", date: "", location: "", position: "bottom-left" };
+const browserImageCache = new Map();
+const rotatedImageCache = new WeakMap();
 
 const emptyDraft = (templateId = "template-feed") => ({
   id: "",
@@ -77,6 +85,7 @@ const emptyDraft = (templateId = "template-feed") => ({
   templateId,
   scheduledFor: "",
   destinations: ["feed", "story"],
+  eventOverlay: { ...DEFAULT_EVENT_OVERLAY },
   images: [],
 });
 
@@ -114,7 +123,8 @@ export default function StudioApp() {
         ? {
             ...campaign,
             destinations: campaign.destinations?.length ? campaign.destinations : ["feed", "story"],
-            images: campaign.images.map((image) => ({ ...image, type: image.type || "image" })),
+            eventOverlay: normalizeEventOverlay(campaign.eventOverlay),
+            images: campaign.images.map((image) => ({ ...image, type: image.type || "image", edit: normalizePhotoEdit(image.edit) })),
           }
         : emptyDraft(templateId),
     );
@@ -232,7 +242,7 @@ export default function StudioApp() {
             const mediaIds = [];
             for (let index = 0; index < draft.images.length; index += 1) {
               setPublishProgress(`Preparing Feed photo ${index + 1} of ${draft.images.length}`);
-              const photo = await renderTemplatedImage(draft.images[index].src, template?.image);
+              const photo = await renderTemplatedImage(draft.images[index], template?.image, draft.eventOverlay, draft.title);
               const form = new FormData();
               form.set("photo", photo, `campaign-photo-${String(index + 1).padStart(2, "0")}.jpg`);
               setPublishProgress(`Uploading Feed photo ${index + 1} of ${draft.images.length}`);
@@ -260,7 +270,7 @@ export default function StudioApp() {
         if (destinations.includes("story")) {
           try {
             setPublishProgress("Preparing Facebook My Day");
-            const storyPhoto = await renderStoryImage(draft.images[0].src, template?.image);
+            const storyPhoto = await renderStoryImage(draft.images[0], template?.image, draft.eventOverlay, draft.title);
             const form = new FormData();
             form.set("photo", storyPhoto, "campaign-story.jpg");
             setPublishProgress("Publishing Facebook My Day");
@@ -794,8 +804,10 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [draggedImageId, setDraggedImageId] = useState(null);
+  const [editingImageId, setEditingImageId] = useState(null);
   const activeTemplate = templates.find((item) => item.id === draft.templateId) || templates[0];
   const hasVideo = draft.images.some((item) => item.type === "video");
+  const editingImage = draft.images.find((item) => item.id === editingImageId && item.type !== "video");
   async function addMedia(files) {
     const selected = [...files];
     const videoFiles = selected.filter((file) => file.type.startsWith("video/"));
@@ -831,14 +843,23 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
     if (!imageFiles.length) return;
     setUploading(true);
     try {
-      const images = await Promise.all(imageFiles.map(async (file) => ({ id: createId("image"), type: "image", name: file.name, src: await compressImage(file) })));
+      const images = await Promise.all(imageFiles.map(async (file) => ({ id: createId("image"), type: "image", name: file.name, src: await compressImage(file), edit: { ...DEFAULT_PHOTO_EDIT } })));
       setDraft((current) => ({ ...current, images: [...current.images, ...images] }));
       toast.success(`${images.length} image${images.length === 1 ? "" : "s"} added.`);
     } catch {
       toast.error("One of those images could not be added.");
     } finally { setUploading(false); }
   }
-  function removeImage(id) { setDraft((current) => ({ ...current, images: current.images.filter((item) => item.id !== id) })); }
+  function removeImage(id) {
+    if (editingImageId === id) setEditingImageId(null);
+    setDraft((current) => ({ ...current, images: current.images.filter((item) => item.id !== id) }));
+  }
+  function updatePhotoEdit(id, edit) {
+    setDraft((current) => ({ ...current, images: current.images.map((item) => item.id === id ? { ...item, edit: normalizePhotoEdit(edit) } : item) }));
+  }
+  function updateEventOverlay(changes) {
+    setDraft((current) => ({ ...current, eventOverlay: { ...normalizeEventOverlay(current.eventOverlay), ...changes } }));
+  }
   function toggleDestination(destination) {
     const current = draft.destinations?.length ? draft.destinations : [];
     const destinations = current.includes(destination) ? current.filter((item) => item !== destination) : [...current, destination];
@@ -913,6 +934,7 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
                       >
                         {image.type === "video" ? <video src={image.src} muted playsInline preload="metadata" aria-label={image.name} /> : <img src={image.src} alt={image.name} />}
                         {index === 0 && <span className="cover-badge">Cover</span>}
+                        {image.type !== "video" && <button type="button" className="edit-photo-button" onClick={() => setEditingImageId(image.id)} aria-label={`Edit crop for ${image.name}`}><Crop size={14} /> Edit</button>}
                         <div className="media-position" title="Drag to rearrange"><GripVertical size={14} /><span>{index + 1}</span></div>
                         <div className="media-controls">
                           <button type="button" onClick={() => moveImage(image.id, -1)} disabled={index === 0} aria-label={`Move ${image.name} left`}><ChevronLeft size={15} /></button>
@@ -926,9 +948,20 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
               )}
             </section>
             <section className="composer-section">
-              <div className="step-heading"><span>3</span><div><h3>Write the caption</h3><p>Keep it clear, warm, and useful for the community.</p></div></div>
+              <div className="step-heading"><span>3</span><div><h3>Caption and event details</h3><p>Write the post, then optionally add an event banner to every photo.</p></div></div>
               <Field label="Post copy" hint={`${draft.caption.length} / 2,200`}><textarea rows={7} value={draft.caption} onChange={(event) => setDraft({ ...draft, caption: event.target.value.slice(0, 2200) })} placeholder="Share the story behind this update…" /></Field>
               <div className="caption-tools"><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}#DILGGensan #SerbisyongMatino` })}># Add hashtags</button><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}📍 General Santos City` })}>Add location</button></div>
+              <div className={clsx("event-overlay-panel", hasVideo && "is-disabled")}>
+                <ToggleRow title="Event information overlay" text={hasVideo ? "Available for photo campaigns" : "Add the same event banner above every photo without changing the template."} checked={!hasVideo && draft.eventOverlay?.enabled} onChange={(enabled) => !hasVideo && updateEventOverlay({ enabled })} />
+                {!hasVideo && draft.eventOverlay?.enabled && (
+                  <motion.div className="event-overlay-fields" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
+                    <Field label="Event title" hint="Uses campaign title if blank"><input value={draft.eventOverlay.title} maxLength={120} onChange={(event) => updateEventOverlay({ title: event.target.value })} placeholder={draft.title || "Event title"} /></Field>
+                    <Field label="Event date"><input type="date" value={draft.eventOverlay.date} onChange={(event) => updateEventOverlay({ date: event.target.value })} /></Field>
+                    <Field label="Location"><input value={draft.eventOverlay.location} maxLength={80} onChange={(event) => updateEventOverlay({ location: event.target.value })} placeholder="e.g. General Santos City" /></Field>
+                    <Field label="Banner placement"><select value={normalizeEventOverlay(draft.eventOverlay).position} onChange={(event) => updateEventOverlay({ position: event.target.value })}><option value="top-left">Top left</option><option value="top-center">Top center</option><option value="top-right">Top right</option><option value="bottom-left">Bottom left</option><option value="bottom-center">Bottom center</option><option value="bottom-right">Bottom right</option></select></Field>
+                  </motion.div>
+                )}
+              </div>
             </section>
             <section className="composer-section">
               <div className="step-heading"><span>4</span><div><h3>Choose where to publish</h3><p>Send this campaign to the Facebook Feed, My Day, or both.</p></div></div>
@@ -949,8 +982,61 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
         </div>
         <footer className="composer-footer"><div className="composer-save-area"><button className="text-button" onClick={onSave} disabled={publishing}>Save draft</button>{publishing && <span className="publish-progress"><Loader2 className="spin" size={15} /> {publishProgress}</span>}</div><div><button className="secondary-button" onClick={onReview} disabled={publishing}><BadgeCheck size={17} /> Submit for review</button><button className="primary-button" onClick={onPublish} disabled={publishing}>{publishing ? <Loader2 className="spin" size={17} /> : <Send size={17} />} {publishing ? "Publishing…" : draft.scheduledFor ? "Schedule on Facebook" : "Publish to Facebook"}</button></div></footer>
       </motion.section>
+      <AnimatePresence>
+        {editingImage && <PhotoEditor media={editingImage} template={activeTemplate} eventOverlay={draft.eventOverlay} campaignTitle={draft.title} onChange={(edit) => updatePhotoEdit(editingImage.id, edit)} onClose={() => setEditingImageId(null)} />}
+      </AnimatePresence>
     </motion.div>
   );
+}
+
+function PhotoEditor({ media, template, eventOverlay, campaignTitle, onChange, onClose }) {
+  const edit = normalizePhotoEdit(media.edit);
+  function change(key, value) { onChange({ ...edit, [key]: value }); }
+  function rotate(amount) { change("rotation", (edit.rotation + amount + 360) % 360); }
+  return (
+    <motion.div className="photo-editor-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <motion.section className="photo-editor" role="dialog" aria-modal="true" aria-label={`Edit ${media.name}`} initial={{ opacity: 0, y: 18, scale: .97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: .98 }}>
+        <header><div><span className="section-kicker"><Crop size={14} /> Photo editor</span><h3>Fit photo to template</h3><p>Adjust only this photo. The template and event banner remain locked.</p></div><button className="icon-button" onClick={onClose} aria-label="Close photo editor"><X size={19} /></button></header>
+        <div className="photo-editor-body">
+          <div className="photo-editor-stage">
+            <div className="photo-editor-canvas-wrap"><ComposedPhotoPreview media={media} template={template} eventOverlay={eventOverlay} campaignTitle={campaignTitle} className="photo-editor-canvas" /></div>
+            <span><Crop size={15} /> The visible area is the exact crop that will be published.</span>
+          </div>
+          <div className="photo-editor-controls">
+            <EditRange label="Zoom" value={`${Math.round(edit.zoom * 100)}%`} min="1" max="3" step="0.05" current={edit.zoom} onChange={(value) => change("zoom", Number(value))} />
+            <EditRange label="Horizontal crop" value={`${Math.round(edit.positionX)}%`} min="0" max="100" step="1" current={edit.positionX} onChange={(value) => change("positionX", Number(value))} />
+            <EditRange label="Vertical crop" value={`${Math.round(edit.positionY)}%`} min="0" max="100" step="1" current={edit.positionY} onChange={(value) => change("positionY", Number(value))} />
+            <div className="rotation-controls"><span>Rotation <strong>{edit.rotation}°</strong></span><div><button type="button" onClick={() => rotate(-90)}><RotateCcw size={17} /> Left</button><button type="button" onClick={() => rotate(90)}><RotateCw size={17} /> Right</button></div></div>
+            <div className="editor-tip"><WandSparkles size={17} /><span>Start with zoom, then use the horizontal and vertical controls to place faces and important details inside the frame.</span></div>
+          </div>
+        </div>
+        <footer><button className="secondary-button" onClick={() => onChange({ ...DEFAULT_PHOTO_EDIT })}><RefreshCcw size={17} /> Reset photo</button><button className="primary-button" onClick={onClose}><Check size={17} /> Done editing</button></footer>
+      </motion.section>
+    </motion.div>
+  );
+}
+
+function EditRange({ label, value, current, onChange, ...rangeProps }) {
+  return <label className="edit-range"><span>{label}<strong>{value}</strong></span><input type="range" value={current} onChange={(event) => onChange(event.target.value)} {...rangeProps} /></label>;
+}
+
+function ComposedPhotoPreview({ media, template, eventOverlay, campaignTitle, className }) {
+  const canvasRef = useRef(null);
+  const edit = useMemo(() => normalizePhotoEdit(media?.edit), [media?.edit]);
+  const overlay = useMemo(() => normalizeEventOverlay(eventOverlay), [eventOverlay]);
+  useEffect(() => {
+    let active = true;
+    if (!media?.src) return undefined;
+    Promise.all([loadBrowserImage(media.src), template?.image ? loadBrowserImage(template.image) : null]).then(([source, templateImage]) => {
+      if (!active || !canvasRef.current) return;
+      const canvas = canvasRef.current;
+      canvas.width = templateImage?.naturalWidth || source.naturalWidth;
+      canvas.height = templateImage?.naturalHeight || source.naturalHeight;
+      paintPhotoComposition(canvas.getContext("2d"), source, templateImage, canvas.width, canvas.height, edit, overlay, campaignTitle);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [media?.src, template?.image, edit, overlay, campaignTitle]);
+  return <canvas ref={canvasRef} className={className} role="img" aria-label="Edited photo with template and event overlay" />;
 }
 
 function FacebookPreview({ draft, settings, template }) {
@@ -962,8 +1048,7 @@ function FacebookPreview({ draft, settings, template }) {
       <div className="fb-post-header"><div className="fb-avatar"><img src="/brand/dilg-logo.png" alt="" /></div><div><strong>{settings.pageName}</strong><span>Just now · <span aria-label="Public">🌐</span></span></div><MoreHorizontal size={18} /></div>
       <div className={clsx("fb-caption", !draft.caption && "placeholder")}>{draft.caption || "Your caption will appear here as you write…"}</div>
       <div className="fb-media">
-        {isVideo ? <video className="fb-source" src={primaryImage} controls playsInline preload="metadata" /> : primaryImage ? <img className="fb-source" src={primaryImage} alt="Post preview" /> : <div className="fb-empty"><ImagePlus size={28} /><span>Add photos or a video to preview the post</span></div>}
-        {primaryImage && !isVideo && template?.image && <img className="fb-template" src={template.image} alt="" />}
+        {isVideo ? <video className="fb-source" src={primaryImage} controls playsInline preload="metadata" /> : primaryImage ? <ComposedPhotoPreview className="fb-source" media={primaryMedia} template={template} eventOverlay={draft.eventOverlay} campaignTitle={draft.title} /> : <div className="fb-empty"><ImagePlus size={28} /><span>Add photos or a video to preview the post</span></div>}
         {draft.images.length > 1 && <span className="photo-count">+{draft.images.length - 1}</span>}
       </div>
       <div className="fb-engagement"><span>👍 ❤️ <small>24</small></span><span>5 comments · 2 shares</span></div>
@@ -1030,26 +1115,19 @@ async function requestJson(url, options = {}) {
   return payload;
 }
 
-async function renderTemplatedImage(sourceUrl, templateUrl) {
-  const [source, template] = await Promise.all([loadBrowserImage(sourceUrl), templateUrl ? loadBrowserImage(templateUrl) : null]);
+async function renderTemplatedImage(media, templateUrl, eventOverlay, campaignTitle) {
+  const [source, template] = await Promise.all([loadBrowserImage(media.src), templateUrl ? loadBrowserImage(templateUrl) : null]);
   const width = template?.naturalWidth || source.naturalWidth;
   const height = template?.naturalHeight || source.naturalHeight;
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  const context = canvas.getContext("2d");
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, width, height);
-  const scale = Math.max(width / source.naturalWidth, height / source.naturalHeight);
-  const drawWidth = source.naturalWidth * scale;
-  const drawHeight = source.naturalHeight * scale;
-  context.drawImage(source, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
-  if (template) context.drawImage(template, 0, 0, width, height);
+  paintPhotoComposition(canvas.getContext("2d"), source, template, width, height, media.edit, eventOverlay, campaignTitle);
   return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("The post image could not be prepared.")), "image/jpeg", .88));
 }
 
-async function renderStoryImage(sourceUrl, templateUrl) {
-  const [source, template] = await Promise.all([loadBrowserImage(sourceUrl), templateUrl ? loadBrowserImage(templateUrl) : null]);
+async function renderStoryImage(media, templateUrl, eventOverlay, campaignTitle) {
+  const [source, template] = await Promise.all([loadBrowserImage(media.src), templateUrl ? loadBrowserImage(templateUrl) : null]);
   const canvas = document.createElement("canvas");
   canvas.width = 1080;
   canvas.height = 1920;
@@ -1059,7 +1137,7 @@ async function renderStoryImage(sourceUrl, templateUrl) {
   context.fillRect(0, 0, canvas.width, canvas.height);
   context.save();
   context.filter = "blur(34px) brightness(.55)";
-  drawImageCover(context, source, -70, -70, canvas.width + 140, canvas.height + 140);
+  drawEditedImageCover(context, source, -70, -70, canvas.width + 140, canvas.height + 140, media.edit);
   context.restore();
   context.fillStyle = "rgba(13, 16, 38, .34)";
   context.fillRect(0, 0, canvas.width, canvas.height);
@@ -1088,18 +1166,134 @@ async function renderStoryImage(sourceUrl, templateUrl) {
   context.beginPath();
   context.roundRect(frameX, frameY, frameWidth, frameHeight, 24);
   context.clip();
-  drawImageCover(context, source, frameX, frameY, frameWidth, frameHeight);
-  if (template) context.drawImage(template, frameX, frameY, frameWidth, frameHeight);
+  context.translate(frameX, frameY);
+  paintPhotoComposition(context, source, template, frameWidth, frameHeight, media.edit, eventOverlay, campaignTitle);
   context.restore();
 
   return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("The Story image could not be prepared.")), "image/jpeg", .9));
 }
 
-function drawImageCover(context, image, x, y, width, height) {
-  const scale = Math.max(width / image.naturalWidth, height / image.naturalHeight);
-  const drawWidth = image.naturalWidth * scale;
-  const drawHeight = image.naturalHeight * scale;
-  context.drawImage(image, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
+function paintPhotoComposition(context, source, template, width, height, edit, eventOverlay, campaignTitle) {
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  drawEditedImageCover(context, source, 0, 0, width, height, edit);
+  if (template) context.drawImage(template, 0, 0, width, height);
+  drawEventOverlay(context, width, height, eventOverlay, campaignTitle);
+}
+
+function drawEditedImageCover(context, image, x, y, width, height, editValue) {
+  const edit = normalizePhotoEdit(editValue);
+  const source = getRotatedImage(image, edit.rotation);
+  const sourceWidth = source.naturalWidth || source.width;
+  const sourceHeight = source.naturalHeight || source.height;
+  const scale = Math.max(width / sourceWidth, height / sourceHeight) * edit.zoom;
+  const drawWidth = sourceWidth * scale;
+  const drawHeight = sourceHeight * scale;
+  const drawX = x + (width - drawWidth) * (edit.positionX / 100);
+  const drawY = y + (height - drawHeight) * (edit.positionY / 100);
+  context.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+}
+
+function getRotatedImage(image, rotationValue) {
+  const rotation = ((Math.round(Number(rotationValue) / 90) * 90) % 360 + 360) % 360;
+  if (!rotation) return image;
+  let rotations = rotatedImageCache.get(image);
+  if (!rotations) {
+    rotations = new Map();
+    rotatedImageCache.set(image, rotations);
+  }
+  if (rotations.has(rotation)) return rotations.get(rotation);
+  const width = image.naturalWidth;
+  const height = image.naturalHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = rotation % 180 ? height : width;
+  canvas.height = rotation % 180 ? width : height;
+  const context = canvas.getContext("2d");
+  context.translate(canvas.width / 2, canvas.height / 2);
+  context.rotate(rotation * Math.PI / 180);
+  context.drawImage(image, -width / 2, -height / 2, width, height);
+  rotations.set(rotation, canvas);
+  return canvas;
+}
+
+function drawEventOverlay(context, width, height, overlayValue, campaignTitle) {
+  const overlay = normalizeEventOverlay(overlayValue);
+  const title = (overlay.title || campaignTitle || "").trim();
+  const meta = [formatEventDate(overlay.date), overlay.location.trim()].filter(Boolean).join("  ·  ");
+  if (!overlay.enabled || (!title && !meta)) return;
+
+  const marginX = width * .04;
+  const marginY = height * .045;
+  const boxWidth = width * .72;
+  const paddingX = Math.max(18, width * .032);
+  const paddingY = Math.max(14, width * .018);
+  const stripeHeight = Math.max(7, width * .007);
+  const titleSize = clamp(width * .032, 24, 48);
+  const titleLineHeight = titleSize * 1.1;
+  const metaSize = clamp(titleSize * .48, 14, 22);
+  context.font = `800 ${titleSize}px Arial, sans-serif`;
+  const titleLines = title ? wrapCanvasText(context, title.toUpperCase(), boxWidth - paddingX * 2, 2) : [];
+  const boxHeight = stripeHeight + paddingY * 2 + titleLines.length * titleLineHeight + (meta ? metaSize * 1.45 : 0);
+
+  const [, horizontal] = overlay.position.split("-");
+  const boxX = horizontal === "right" ? width - marginX - boxWidth : horizontal === "center" ? (width - boxWidth) / 2 : marginX;
+  const boxY = overlay.position.startsWith("top") ? marginY : height - marginY - boxHeight;
+  context.save();
+  context.fillStyle = "rgba(9, 12, 27, .92)";
+  context.beginPath();
+  context.roundRect(boxX, boxY, boxWidth, boxHeight, Math.max(10, width * .012));
+  context.fill();
+  drawBrandStripe(context, boxX, boxY, boxWidth, stripeHeight);
+
+  let textY = boxY + stripeHeight + paddingY + titleSize;
+  context.fillStyle = "#ffffff";
+  context.font = `800 ${titleSize}px Arial, sans-serif`;
+  titleLines.forEach((line) => {
+    context.fillText(line, boxX + paddingX, textY);
+    textY += titleLineHeight;
+  });
+  if (meta) {
+    context.fillStyle = "#f2c94c";
+    context.font = `700 ${metaSize}px Arial, sans-serif`;
+    context.fillText(fitCanvasText(context, meta, boxWidth - paddingX * 2), boxX + paddingX, textY + metaSize * .35);
+  }
+  context.restore();
+}
+
+function drawBrandStripe(context, x, y, width, height) {
+  const colors = ["#11113d", "#073166", "#06499a", "#780b10", "#b61925", "#d72d37", "#f29b26", "#ffd51f"];
+  const segment = width / colors.length;
+  colors.forEach((color, index) => {
+    context.fillStyle = color;
+    context.fillRect(x + index * segment, y, segment + 1, height);
+  });
+}
+
+function wrapCanvasText(context, text, maxWidth, maxLines) {
+  const words = String(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  words.forEach((word) => {
+    const next = line ? `${line} ${word}` : word;
+    if (line && context.measureText(next).width > maxWidth) {
+      lines.push(line);
+      line = word;
+    } else line = next;
+  });
+  if (line) lines.push(line);
+  if (lines.length <= maxLines) return lines;
+  const limited = lines.slice(0, maxLines);
+  let last = limited[maxLines - 1];
+  while (last.length > 1 && context.measureText(`${last}…`).width > maxWidth) last = last.slice(0, -1);
+  limited[maxLines - 1] = `${last.trim()}…`;
+  return limited;
+}
+
+function fitCanvasText(context, text, maxWidth) {
+  if (context.measureText(text).width <= maxWidth) return text;
+  let fitted = text;
+  while (fitted.length > 1 && context.measureText(`${fitted}…`).width > maxWidth) fitted = fitted.slice(0, -1);
+  return `${fitted.trim()}…`;
 }
 
 async function prepareTemplateImage(file) {
@@ -1130,12 +1324,18 @@ function fileToDataUrl(file) {
 }
 
 function loadBrowserImage(source) {
-  return new Promise((resolve, reject) => {
+  if (browserImageCache.has(source)) return browserImageCache.get(source);
+  const promise = new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("An image could not be loaded."));
+    image.onerror = () => {
+      browserImageCache.delete(source);
+      reject(new Error("An image could not be loaded."));
+    };
     image.src = source;
   });
+  browserImageCache.set(source, promise);
+  return promise;
 }
 
 async function compressImage(file, maxDimension = 1400, quality = 0.8) {
@@ -1148,6 +1348,41 @@ async function compressImage(file, maxDimension = 1400, quality = 0.8) {
   canvas.height = Math.max(1, Math.round(bitmap.naturalHeight * scale));
   canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL("image/jpeg", quality);
+}
+
+function normalizePhotoEdit(value = {}) {
+  const input = value && typeof value === "object" ? value : {};
+  const rotation = ((Math.round(Number(input.rotation || 0) / 90) * 90) % 360 + 360) % 360;
+  return {
+    zoom: clamp(Number(input.zoom) || 1, 1, 3),
+    positionX: clamp(Number.isFinite(Number(input.positionX)) ? Number(input.positionX) : 50, 0, 100),
+    positionY: clamp(Number.isFinite(Number(input.positionY)) ? Number(input.positionY) : 50, 0, 100),
+    rotation,
+  };
+}
+
+function normalizeEventOverlay(value = {}) {
+  const input = value && typeof value === "object" ? value : {};
+  const legacyPosition = input.position === "top" ? "top-left" : input.position === "bottom" ? "bottom-left" : input.position;
+  const positions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"];
+  return {
+    enabled: Boolean(input.enabled),
+    title: String(input.title || ""),
+    date: String(input.date || ""),
+    location: String(input.location || ""),
+    position: positions.includes(legacyPosition) ? legacyPosition : DEFAULT_EVENT_OVERLAY.position,
+  };
+}
+
+function formatEventDate(value) {
+  if (!value) return "";
+  const parts = String(value).split("-").map(Number);
+  if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return String(value);
+  return new Intl.DateTimeFormat("en-PH", { month: "long", day: "numeric", year: "numeric" }).format(new Date(parts[0], parts[1] - 1, parts[2]));
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
 function readVideoMetadata(file) {
