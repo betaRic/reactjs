@@ -34,7 +34,11 @@ export function getFacebookConfig({ allowMissing = false } = {}) {
 
 export function requirePublishAccess(request, config) {
   const supplied = clean(request.headers.get("x-publish-key"));
-  if (!supplied || !safeEqual(supplied, config.publishKey)) {
+  verifyPublishKeyValue(supplied, config);
+}
+
+export function verifyPublishKeyValue(supplied, config = getFacebookConfig()) {
+  if (!clean(supplied) || !safeEqual(clean(supplied), config.publishKey)) {
     throw new FacebookApiError("The publishing key is missing or incorrect.", 401);
   }
 }
@@ -99,6 +103,83 @@ export async function createPagePost(config, { message, mediaIds, scheduledFor }
   return { postId: result.id, permalink, scheduled };
 }
 
+export async function publishPhotoStory(config, photoId) {
+  const body = new URLSearchParams();
+  body.set("photo_id", clean(photoId));
+  const result = await graphRequest(config, `${config.pageId}/photo_stories`, {
+    method: "POST",
+    body,
+    label: "Publish Facebook photo story",
+  });
+  if (!result.success && !result.post_id && !result.id) {
+    throw new FacebookApiError("Meta did not confirm the Facebook Story.", 502);
+  }
+  return { storyId: String(result.post_id || result.id || photoId), success: true };
+}
+
+export async function publishVideo(config, { videoUrl, message, title, scheduledFor }) {
+  const body = new URLSearchParams();
+  body.set("file_url", clean(videoUrl));
+  body.set("description", clean(message));
+  if (clean(title)) body.set("title", clean(title));
+  let scheduled = false;
+  if (scheduledFor) {
+    const scheduleDate = validateScheduleDate(scheduledFor);
+    body.set("published", "false");
+    body.set("scheduled_publish_time", String(Math.floor(scheduleDate.getTime() / 1000)));
+    scheduled = true;
+  }
+  const result = await graphRequest(config, `${config.pageId}/videos`, {
+    method: "POST",
+    body,
+    label: scheduled ? "Schedule Facebook video" : "Publish Facebook video",
+  });
+  if (!result.id) throw new FacebookApiError("Meta did not return an ID for the video post.", 502);
+  return { postId: String(result.id), scheduled, permalink: "" };
+}
+
+export async function publishVideoStory(config, videoUrl) {
+  const startBody = new URLSearchParams();
+  startBody.set("upload_phase", "start");
+  const started = await graphRequest(config, `${config.pageId}/video_stories`, {
+    method: "POST",
+    body: startBody,
+    label: "Start Facebook video story",
+  });
+  if (!started.video_id || !started.upload_url) throw new FacebookApiError("Meta did not create the Story upload session.", 502);
+
+  const uploadUrl = new URL(started.upload_url);
+  if (uploadUrl.protocol !== "https:" || uploadUrl.hostname !== "rupload.facebook.com") {
+    throw new FacebookApiError("Meta returned an unexpected Story upload URL.", 502);
+  }
+  const uploadResponse = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `OAuth ${config.accessToken}`,
+      file_url: clean(videoUrl),
+    },
+    cache: "no-store",
+    signal: AbortSignal.timeout(30_000),
+  });
+  const uploadResult = await uploadResponse.json().catch(() => ({}));
+  if (!uploadResponse.ok || uploadResult.error) {
+    throw new FacebookApiError(uploadResult.error?.message || "The Story video could not be transferred to Meta.", 502);
+  }
+
+  const finishBody = new URLSearchParams();
+  finishBody.set("upload_phase", "finish");
+  finishBody.set("video_id", String(started.video_id));
+  const finished = await graphRequest(config, `${config.pageId}/video_stories`, {
+    method: "POST",
+    body: finishBody,
+    label: "Publish Facebook video story",
+  });
+  if (!finished.success && !finished.post_id && !finished.id) {
+    throw new FacebookApiError("Meta did not confirm the video Story.", 502);
+  }
+  return { storyId: String(finished.post_id || finished.id || started.video_id), videoId: String(started.video_id), success: true };
+}
+
 export function toRouteError(error) {
   const status = Number(error?.status) || 500;
   const message = error instanceof FacebookApiError ? error.message : "The Facebook request could not be completed.";
@@ -151,4 +232,12 @@ function safeEqual(left, right) {
 
 function clean(value) {
   return String(value || "").trim();
+}
+
+function validateScheduleDate(value) {
+  const scheduleDate = new Date(value);
+  const minimum = Date.now() + 10 * 60 * 1000;
+  if (!Number.isFinite(scheduleDate.getTime())) throw new FacebookApiError("The scheduled date is invalid.", 400);
+  if (scheduleDate.getTime() < minimum) throw new FacebookApiError("Facebook scheduled posts must be at least 10 minutes in the future.", 400);
+  return scheduleDate;
 }

@@ -2,6 +2,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { AnimatePresence, motion } from "motion/react";
+import { upload } from "@vercel/blob/client";
 import {
   Activity,
   ArrowRight,
@@ -15,10 +16,12 @@ import {
   CircleDashed,
   Clock3,
   Download,
+  CloudUpload,
   ExternalLink,
   FileImage,
   ImagePlus,
   Images,
+  Newspaper,
   LayoutDashboard,
   Loader2,
   KeyRound,
@@ -35,6 +38,8 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  Video,
+  Smartphone,
   WandSparkles,
   Wifi,
   X,
@@ -71,6 +76,7 @@ const emptyDraft = (templateId = "template-feed") => ({
   status: "Draft",
   templateId,
   scheduledFor: "",
+  destinations: ["feed", "story"],
   images: [],
 });
 
@@ -105,7 +111,11 @@ export default function StudioApp() {
     const templateId = studio?.settings.defaultTemplateId || studio?.templates[0]?.id;
     setDraft(
       campaign
-        ? { ...campaign, images: campaign.images.map((image) => ({ ...image })) }
+        ? {
+            ...campaign,
+            destinations: campaign.destinations?.length ? campaign.destinations : ["feed", "story"],
+            images: campaign.images.map((image) => ({ ...image, type: image.type || "image" })),
+          }
         : emptyDraft(templateId),
     );
     setComposerOpen(true);
@@ -153,60 +163,128 @@ export default function StudioApp() {
     }));
     setComposerOpen(false);
     toast.success(
-      extra.facebookPostId
+      extra.facebookPostId || extra.facebookStoryId
         ? nextStatus === "Scheduled" ? "Post scheduled on Facebook." : "Post published to Facebook."
         : nextStatus === "Draft" ? "Draft saved to this device." : `Campaign marked ${nextStatus.toLowerCase()}.`,
     );
   }
 
   function submitForReview() {
-    if (!draft.title.trim() || !draft.caption.trim() || draft.images.length === 0) {
-      toast.error("Add a title, caption, and at least one image before review.");
+    const destinations = draft.destinations?.length ? draft.destinations : [];
+    if (!draft.title.trim() || draft.images.length === 0 || (destinations.includes("feed") && !draft.caption.trim())) {
+      toast.error(destinations.includes("feed") ? "Add a title, Feed caption, and media before review." : "Add a title and media before review.");
       return;
     }
     saveCampaign("Ready for review");
   }
 
   async function publishCampaign() {
-    if (!draft.title.trim() || !draft.caption.trim() || draft.images.length === 0) {
-      toast.error("Add a title, caption, and at least one image before publishing.");
+    if (!draft.title.trim() || draft.images.length === 0) {
+      toast.error("Add a title and at least one photo or video before publishing.");
       return;
     }
     if (!publishKey) {
       toast.error("Add your session publishing key in Settings before posting.");
       return;
     }
+    const destinations = draft.destinations?.length ? draft.destinations : [];
+    if (!destinations.length) {
+      toast.error("Choose Facebook Feed, My Day, or both.");
+      return;
+    }
+    if (destinations.includes("feed") && !draft.caption.trim()) {
+      toast.error("Add a caption for the Facebook Feed post.");
+      return;
+    }
+    if (draft.scheduledFor && destinations.includes("story")) {
+      toast.error("Facebook My Day publishes immediately. Clear the schedule or choose Feed only.");
+      return;
+    }
+    const video = draft.images.find((item) => item.type === "video");
+    if (video && destinations.includes("story") && Number(video.duration || 0) > 60) {
+      toast.error("Facebook My Day videos must be 60 seconds or shorter. Choose Feed only or upload a shorter video.");
+      return;
+    }
     setPublishing(true);
     try {
-      const template = studio.templates.find((item) => item.id === draft.templateId) || studio.templates[0];
-      const mediaIds = [];
-      for (let index = 0; index < draft.images.length; index += 1) {
-        setPublishProgress(`Preparing photo ${index + 1} of ${draft.images.length}`);
-        const photo = await renderTemplatedImage(draft.images[index].src, template?.image);
-        const form = new FormData();
-        form.set("photo", photo, `campaign-photo-${String(index + 1).padStart(2, "0")}.jpg`);
-        setPublishProgress(`Uploading photo ${index + 1} of ${draft.images.length}`);
-        const upload = await requestJson("/api/facebook/media", {
+      const results = { feed: null, story: null };
+      const errors = [];
+      if (video) {
+        setPublishProgress("Sending video to Facebook");
+        const result = await requestJson("/api/facebook/video", {
           method: "POST",
-          headers: { "x-publish-key": publishKey },
-          body: form,
+          headers: { "Content-Type": "application/json", "x-publish-key": publishKey },
+          body: JSON.stringify({
+            title: draft.title,
+            message: draft.caption,
+            videoUrl: video.src,
+            destinations,
+            scheduledFor: draft.scheduledFor ? new Date(draft.scheduledFor).toISOString() : "",
+          }),
         });
-        mediaIds.push(upload.mediaId);
+        results.feed = result.feed;
+        results.story = result.story;
+        errors.push(...(result.errors || []));
+      } else {
+        const template = studio.templates.find((item) => item.id === draft.templateId) || studio.templates[0];
+        if (destinations.includes("feed")) {
+          try {
+            const mediaIds = [];
+            for (let index = 0; index < draft.images.length; index += 1) {
+              setPublishProgress(`Preparing Feed photo ${index + 1} of ${draft.images.length}`);
+              const photo = await renderTemplatedImage(draft.images[index].src, template?.image);
+              const form = new FormData();
+              form.set("photo", photo, `campaign-photo-${String(index + 1).padStart(2, "0")}.jpg`);
+              setPublishProgress(`Uploading Feed photo ${index + 1} of ${draft.images.length}`);
+              const uploaded = await requestJson("/api/facebook/media", {
+                method: "POST",
+                headers: { "x-publish-key": publishKey },
+                body: form,
+              });
+              mediaIds.push(uploaded.mediaId);
+            }
+            setPublishProgress(draft.scheduledFor ? "Scheduling Facebook Feed post" : "Publishing Facebook Feed post");
+            results.feed = await requestJson("/api/facebook/publish", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "x-publish-key": publishKey },
+              body: JSON.stringify({
+                message: draft.caption,
+                mediaIds,
+                scheduledFor: draft.scheduledFor ? new Date(draft.scheduledFor).toISOString() : "",
+              }),
+            });
+          } catch (error) {
+            errors.push({ destination: "feed", message: error.message });
+          }
+        }
+        if (destinations.includes("story")) {
+          try {
+            setPublishProgress("Preparing Facebook My Day");
+            const storyPhoto = await renderStoryImage(draft.images[0].src, template?.image);
+            const form = new FormData();
+            form.set("photo", storyPhoto, "campaign-story.jpg");
+            setPublishProgress("Publishing Facebook My Day");
+            results.story = await requestJson("/api/facebook/story/photo", {
+              method: "POST",
+              headers: { "x-publish-key": publishKey },
+              body: form,
+            });
+          } catch (error) {
+            errors.push({ destination: "story", message: error.message });
+          }
+        }
       }
-      setPublishProgress(draft.scheduledFor ? "Scheduling on Facebook" : "Publishing to Facebook");
-      const result = await requestJson("/api/facebook/publish", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-publish-key": publishKey },
-        body: JSON.stringify({
-          message: draft.caption,
-          mediaIds,
-          scheduledFor: draft.scheduledFor ? new Date(draft.scheduledFor).toISOString() : "",
-        }),
+      if (!results.feed && !results.story) {
+        throw new Error(errors.map((item) => `${destinationLabel(item.destination)}: ${item.message}`).join(" · ") || "Facebook publishing failed.");
+      }
+      const scheduled = Boolean(results.feed?.scheduled) && !results.story;
+      saveCampaign(scheduled ? "Scheduled" : "Published", {
+        facebookPostId: results.feed?.postId || "",
+        facebookPermalink: results.feed?.permalink || "",
+        facebookStoryId: results.story?.storyId || "",
+        publishedDestinations: [results.feed && "feed", results.story && "story"].filter(Boolean),
       });
-      saveCampaign(result.scheduled ? "Scheduled" : "Published", {
-        facebookPostId: result.postId,
-        facebookPermalink: result.permalink || "",
-      });
+      if (errors.length) toast.warning(`Published partially. ${errors.map((item) => `${destinationLabel(item.destination)}: ${item.message}`).join(" · ")}`, { duration: 9000 });
     } catch (error) {
       toast.error(error.message || "Facebook publishing failed.", { duration: 8000 });
     } finally {
@@ -306,6 +384,7 @@ export default function StudioApp() {
             setDraft={setDraft}
             templates={studio.templates}
             settings={studio.settings}
+            publishKey={publishKey}
             publishing={publishing}
             publishProgress={publishProgress}
             onClose={() => setComposerOpen(false)}
@@ -427,7 +506,7 @@ function Overview({ studio, openComposer, setActiveView, updateCampaignStatus })
             {queue.length ? queue.map((campaign, index) => (
               <article className="queue-row" key={campaign.id}>
                 <div className="queue-line"><span className={clsx("queue-dot", statusTone(campaign.status))} />{index < queue.length - 1 && <i />}</div>
-                <img src={campaign.images[0]?.src || "/demo/sample-landscape.jpg"} alt="" />
+                <CampaignMedia media={campaign.images[0]} />
                 <div className="queue-copy"><strong>{campaign.title}</strong><span><Clock3 size={14} /> {formatRelativeDate(campaign.scheduledFor)}</span></div>
                 <StatusBadge status={campaign.status} />
                 {campaign.status === "Ready for review" && (
@@ -481,7 +560,7 @@ function Campaigns({ studio, openComposer, deleteCampaign }) {
             <tbody>
               {campaigns.map((campaign) => (
                 <tr key={campaign.id}>
-                  <td><button className="campaign-cell" onClick={() => openComposer(campaign)}><img src={campaign.images[0]?.src || "/demo/sample-landscape.jpg"} alt="" /><span><strong>{campaign.title}</strong><small>Updated {formatRelativeDate(campaign.updatedAt)}</small></span></button></td>
+                  <td><button className="campaign-cell" onClick={() => openComposer(campaign)}><CampaignMedia media={campaign.images[0]} /><span><strong>{campaign.title}</strong><small>Updated {formatRelativeDate(campaign.updatedAt)}</small></span></button></td>
                   <td><StatusBadge status={campaign.status} /></td>
                   <td><span className="table-muted">{formatRelativeDate(campaign.scheduledFor)}</span></td>
                   <td><span className="media-count"><Images size={16} /> {campaign.images.length}</span></td>
@@ -688,6 +767,7 @@ function FacebookConnection({ publishKey, setPublishKey }) {
       const result = await requestJson("/api/facebook/status", { headers: { "x-publish-key": publishKey } });
       setConnection(result);
       if (!result.configured) toast.error(`Vercel is missing: ${result.missing.join(", ")}`);
+      else if (!result.videoStorageConfigured) toast.warning(`Connected to ${result.page.name}. Add a public Vercel Blob store to enable video uploads.`);
       else toast.success(`Connected to ${result.page.name}.`);
     } catch (error) {
       setConnection({ configured: true, connected: false, error: error.message });
@@ -703,22 +783,55 @@ function FacebookConnection({ publishKey, setPublishKey }) {
       </div>
       <p className="session-key-note">This key authorizes your current browser tab to use the server connection. It is stored only in session storage and clears when the browser session ends.</p>
       {connection?.connected && <div className="connected-page"><div className="connected-page-avatar">{connection.page.picture ? <img src={connection.page.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>{connection.page.name}</strong><span>Page ID {connection.page.id} · Graph API {connection.graphVersion}</span></div>{connection.page.link && <a href={connection.page.link} target="_blank" rel="noreferrer">Open Page <ExternalLink size={14} /></a>}</div>}
+      {connection?.connected && <div className={clsx("video-storage-status", connection.videoStorageConfigured ? "ready" : "missing")}><CloudUpload size={17} /><div><strong>{connection.videoStorageConfigured ? "Video storage ready" : "Video storage not connected"}</strong><span>{connection.videoStorageConfigured ? "Vercel Blob can accept campaign videos." : "Create a public Vercel Blob store to enable video uploads."}</span></div></div>}
       {connection && !connection.connected && <div className="connection-error">{connection.configured === false ? `Server variables still needed: ${connection.missing.join(", ")}` : connection.error}</div>}
     </section>
   );
 }
 
-function Composer({ draft, setDraft, templates, settings, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
+function Composer({ draft, setDraft, templates, settings, publishKey, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
   const fileRef = useRef(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [draggedImageId, setDraggedImageId] = useState(null);
   const activeTemplate = templates.find((item) => item.id === draft.templateId) || templates[0];
-  async function addImages(files) {
-    const imageFiles = [...files].filter((file) => file.type.startsWith("image/")).slice(0, 8 - draft.images.length);
+  const hasVideo = draft.images.some((item) => item.type === "video");
+  async function addMedia(files) {
+    const selected = [...files];
+    const videoFiles = selected.filter((file) => file.type.startsWith("video/"));
+    if (videoFiles.length) {
+      if (selected.length !== 1 || draft.images.length) return toast.error("A video campaign can contain one video and no photos.");
+      if (!publishKey) return toast.error("Enter your session publishing key in Settings before uploading a video.");
+      const file = videoFiles[0];
+      if (!["video/mp4", "video/quicktime", "video/webm"].includes(file.type)) return toast.error("Use an MP4, MOV, or WebM video.");
+      if (file.size > 500 * 1024 * 1024) return toast.error("Videos must be smaller than 500 MB.");
+      setUploading(true);
+      setUploadProgress(0);
+      try {
+        const metadata = await readVideoMetadata(file);
+        const blob = await upload(`campaign-videos/${Date.now()}-${sanitizeFileName(file.name)}`, file, {
+          access: "public",
+          handleUploadUrl: "/api/media/upload",
+          clientPayload: JSON.stringify({ publishKey }),
+          multipart: file.size > 100 * 1024 * 1024,
+          onUploadProgress: ({ percentage }) => setUploadProgress(Math.round(percentage)),
+        });
+        setDraft((current) => ({ ...current, images: [{ id: createId("video"), type: "video", name: file.name, src: blob.url, size: file.size, ...metadata }] }));
+        toast.success("Video uploaded to secure media storage.");
+      } catch (error) {
+        toast.error(error.message || "The video could not be uploaded.", { duration: 7000 });
+      } finally {
+        setUploading(false);
+        setUploadProgress(0);
+      }
+      return;
+    }
+    if (hasVideo) return toast.error("Remove the video before adding photos.");
+    const imageFiles = selected.filter((file) => file.type.startsWith("image/")).slice(0, 8 - draft.images.length);
     if (!imageFiles.length) return;
     setUploading(true);
     try {
-      const images = await Promise.all(imageFiles.map(async (file) => ({ id: createId("image"), name: file.name, src: await compressImage(file) })));
+      const images = await Promise.all(imageFiles.map(async (file) => ({ id: createId("image"), type: "image", name: file.name, src: await compressImage(file) })));
       setDraft((current) => ({ ...current, images: [...current.images, ...images] }));
       toast.success(`${images.length} image${images.length === 1 ? "" : "s"} added.`);
     } catch {
@@ -726,6 +839,12 @@ function Composer({ draft, setDraft, templates, settings, onClose, onSave, onRev
     } finally { setUploading(false); }
   }
   function removeImage(id) { setDraft((current) => ({ ...current, images: current.images.filter((item) => item.id !== id) })); }
+  function toggleDestination(destination) {
+    const current = draft.destinations?.length ? draft.destinations : [];
+    const destinations = current.includes(destination) ? current.filter((item) => item !== destination) : [...current, destination];
+    if (!destinations.length) return toast.error("Keep at least one publishing destination selected.");
+    setDraft({ ...draft, destinations });
+  }
   function moveImage(id, direction) {
     setDraft((current) => {
       const images = [...current.images];
@@ -760,14 +879,14 @@ function Composer({ draft, setDraft, templates, settings, onClose, onSave, onRev
               <Field label="Campaign title"><input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Barangay Assembly Highlights" autoFocus /></Field>
             </section>
             <section className="composer-section">
-              <div className="step-heading"><span>2</span><div><h3>Add your media</h3><p>Upload up to 8 photos. They are compressed and stored locally.</p></div></div>
-              <button className="drop-zone" type="button" onClick={() => fileRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addImages(event.dataTransfer.files); }}>
-                <span className="upload-glyph">{uploading ? <CircleDashed className="spin" size={23} /> : <ImagePlus size={23} />}</span><strong>{uploading ? "Preparing images…" : "Drop photos here or click to browse"}</strong><small>JPG, PNG, or WebP · maximum 8 images</small>
+              <div className="step-heading"><span>2</span><div><h3>Add photos or a video</h3><p>Use up to 8 photos, or one video for Feed and My Day.</p></div></div>
+              <button className="drop-zone" type="button" disabled={uploading} onClick={() => fileRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addMedia(event.dataTransfer.files); }}>
+                <span className="upload-glyph">{uploading ? <CloudUpload className="upload-pulse" size={23} /> : <ImagePlus size={23} />}</span><strong>{uploading ? uploadProgress ? `Uploading video… ${uploadProgress}%` : "Preparing media…" : "Drop photos or a video here"}</strong><small>Photos: JPG, PNG, WebP · Video: MP4, MOV, WebM up to 500 MB</small>
               </button>
-              <input ref={fileRef} hidden type="file" accept="image/*" multiple onChange={(event) => addImages(event.target.files)} />
+              <input ref={fileRef} hidden type="file" accept="image/*,video/mp4,video/quicktime,video/webm" multiple onChange={(event) => { addMedia(event.target.files); event.target.value = ""; }} />
               {draft.images.length > 0 && (
                 <>
-                  <div className="media-order-hint"><GripVertical size={16} /><span>Drag photos to rearrange them, or use the arrow controls. The first photo becomes the cover.</span></div>
+                  <div className="media-order-hint">{hasVideo ? <Video size={16} /> : <GripVertical size={16} />}<span>{hasVideo ? `Video ready · ${formatDuration(draft.images[0].duration)} · ${formatFileSize(draft.images[0].size)}` : "Drag photos to rearrange them, or use the arrow controls. The first photo becomes the cover and My Day image."}</span></div>
                   <div className="image-strip">
                     {draft.images.map((image, index) => (
                       <motion.div
@@ -792,7 +911,7 @@ function Composer({ draft, setDraft, templates, settings, onClose, onSave, onRev
                           setDraggedImageId(null);
                         }}
                       >
-                        <img src={image.src} alt={image.name} />
+                        {image.type === "video" ? <video src={image.src} muted playsInline preload="metadata" aria-label={image.name} /> : <img src={image.src} alt={image.name} />}
                         {index === 0 && <span className="cover-badge">Cover</span>}
                         <div className="media-position" title="Drag to rearrange"><GripVertical size={14} /><span>{index + 1}</span></div>
                         <div className="media-controls">
@@ -812,8 +931,14 @@ function Composer({ draft, setDraft, templates, settings, onClose, onSave, onRev
               <div className="caption-tools"><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}#DILGGensan #SerbisyongMatino` })}># Add hashtags</button><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}📍 General Santos City` })}>Add location</button></div>
             </section>
             <section className="composer-section">
-              <div className="step-heading"><span>4</span><div><h3>Brand and schedule</h3><p>Select a frame and choose when this should go live.</p></div></div>
-              <div className="form-grid two-columns"><Field label="Template"><select value={draft.templateId} onChange={(event) => setDraft({ ...draft, templateId: event.target.value })}>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></Field><Field label="Publish date & time"><input type="datetime-local" value={toDateTimeLocal(draft.scheduledFor)} onChange={(event) => setDraft({ ...draft, scheduledFor: event.target.value })} /></Field></div>
+              <div className="step-heading"><span>4</span><div><h3>Choose where to publish</h3><p>Send this campaign to the Facebook Feed, My Day, or both.</p></div></div>
+              <div className="destination-grid">
+                <button type="button" className={clsx("destination-card", draft.destinations?.includes("feed") && "selected")} aria-pressed={draft.destinations?.includes("feed")} onClick={() => toggleDestination("feed")}><span><Newspaper size={20} /></span><div><strong>Facebook Feed</strong><small>Permanent Page post</small></div><i>{draft.destinations?.includes("feed") && <Check size={14} />}</i></button>
+                <button type="button" className={clsx("destination-card", draft.destinations?.includes("story") && "selected")} aria-pressed={draft.destinations?.includes("story")} onClick={() => toggleDestination("story")}><span><Smartphone size={20} /></span><div><strong>My Day / Story</strong><small>Visible for 24 hours</small></div><i>{draft.destinations?.includes("story") && <Check size={14} />}</i></button>
+              </div>
+              {draft.destinations?.includes("story") && <p className="destination-note">My Day uses the first photo or the selected video. Story text is not supported by Meta, so the caption is used on the Feed post only. My Day publishes immediately.</p>}
+              <div className="form-grid two-columns"><Field label="Template" hint={hasVideo ? "Photos only" : "Applied before publishing"}><select disabled={hasVideo} value={draft.templateId} onChange={(event) => setDraft({ ...draft, templateId: event.target.value })}>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></Field><Field label="Feed publish date & time" hint="Leave blank to publish now"><input type="datetime-local" value={toDateTimeLocal(draft.scheduledFor)} onChange={(event) => setDraft({ ...draft, scheduledFor: event.target.value })} /></Field></div>
+              {draft.scheduledFor && draft.destinations?.includes("story") && <div className="schedule-warning"><CalendarClock size={16} /> Remove My Day or clear the schedule. Meta Stories can only publish immediately through this connection.</div>}
             </section>
           </div>
           <aside className="preview-column">
@@ -829,14 +954,16 @@ function Composer({ draft, setDraft, templates, settings, onClose, onSave, onRev
 }
 
 function FacebookPreview({ draft, settings, template }) {
-  const primaryImage = draft.images[0]?.src;
+  const primaryMedia = draft.images[0];
+  const primaryImage = primaryMedia?.src;
+  const isVideo = primaryMedia?.type === "video";
   return (
     <div className="facebook-preview">
       <div className="fb-post-header"><div className="fb-avatar"><img src="/brand/dilg-logo.png" alt="" /></div><div><strong>{settings.pageName}</strong><span>Just now · <span aria-label="Public">🌐</span></span></div><MoreHorizontal size={18} /></div>
       <div className={clsx("fb-caption", !draft.caption && "placeholder")}>{draft.caption || "Your caption will appear here as you write…"}</div>
       <div className="fb-media">
-        {primaryImage ? <img className="fb-source" src={primaryImage} alt="Post preview" /> : <div className="fb-empty"><ImagePlus size={28} /><span>Add photos to preview the post</span></div>}
-        {primaryImage && template?.image && <img className="fb-template" src={template.image} alt="" />}
+        {isVideo ? <video className="fb-source" src={primaryImage} controls playsInline preload="metadata" /> : primaryImage ? <img className="fb-source" src={primaryImage} alt="Post preview" /> : <div className="fb-empty"><ImagePlus size={28} /><span>Add photos or a video to preview the post</span></div>}
+        {primaryImage && !isVideo && template?.image && <img className="fb-template" src={template.image} alt="" />}
         {draft.images.length > 1 && <span className="photo-count">+{draft.images.length - 1}</span>}
       </div>
       <div className="fb-engagement"><span>👍 ❤️ <small>24</small></span><span>5 comments · 2 shares</span></div>
@@ -848,9 +975,21 @@ function FacebookPreview({ draft, settings, template }) {
 function CampaignCard({ campaign, onOpen }) {
   return (
     <button className="campaign-card" onClick={onOpen}>
-      <div className="campaign-card-image"><img src={campaign.images[0]?.src || "/demo/sample-landscape.jpg"} alt="" /><StatusBadge status={campaign.status} /></div>
+      <div className="campaign-card-image"><CampaignMedia media={campaign.images[0]} /><StatusBadge status={campaign.status} /></div>
       <div className="campaign-card-copy"><strong>{campaign.title}</strong><span><Clock3 size={14} /> {formatRelativeDate(campaign.scheduledFor || campaign.updatedAt)}</span></div>
     </button>
+  );
+}
+
+function CampaignMedia({ media }) {
+  const isVideo = media?.type === "video";
+  return (
+    <span className={clsx("campaign-media", isVideo && "is-video")} aria-hidden="true">
+      {isVideo
+        ? <video src={media.src} muted playsInline preload="metadata" />
+        : <img src={media?.src || "/demo/sample-landscape.jpg"} alt="" />}
+      {isVideo && <span className="video-marker"><Video size={14} /> Video</span>}
+    </span>
   );
 }
 
@@ -909,6 +1048,60 @@ async function renderTemplatedImage(sourceUrl, templateUrl) {
   return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("The post image could not be prepared.")), "image/jpeg", .88));
 }
 
+async function renderStoryImage(sourceUrl, templateUrl) {
+  const [source, template] = await Promise.all([loadBrowserImage(sourceUrl), templateUrl ? loadBrowserImage(templateUrl) : null]);
+  const canvas = document.createElement("canvas");
+  canvas.width = 1080;
+  canvas.height = 1920;
+  const context = canvas.getContext("2d");
+
+  context.fillStyle = "#111329";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.save();
+  context.filter = "blur(34px) brightness(.55)";
+  drawImageCover(context, source, -70, -70, canvas.width + 140, canvas.height + 140);
+  context.restore();
+  context.fillStyle = "rgba(13, 16, 38, .34)";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  const ratio = (template?.naturalWidth || source.naturalWidth) / (template?.naturalHeight || source.naturalHeight);
+  let frameWidth = 960;
+  let frameHeight = frameWidth / ratio;
+  if (frameHeight > 1340) {
+    frameHeight = 1340;
+    frameWidth = frameHeight * ratio;
+  }
+  const frameX = (canvas.width - frameWidth) / 2;
+  const frameY = (canvas.height - frameHeight) / 2;
+
+  context.save();
+  context.shadowColor = "rgba(0, 0, 0, .42)";
+  context.shadowBlur = 42;
+  context.shadowOffsetY = 18;
+  context.fillStyle = "#ffffff";
+  context.beginPath();
+  context.roundRect(frameX, frameY, frameWidth, frameHeight, 24);
+  context.fill();
+  context.restore();
+
+  context.save();
+  context.beginPath();
+  context.roundRect(frameX, frameY, frameWidth, frameHeight, 24);
+  context.clip();
+  drawImageCover(context, source, frameX, frameY, frameWidth, frameHeight);
+  if (template) context.drawImage(template, frameX, frameY, frameWidth, frameHeight);
+  context.restore();
+
+  return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("The Story image could not be prepared.")), "image/jpeg", .9));
+}
+
+function drawImageCover(context, image, x, y, width, height) {
+  const scale = Math.max(width / image.naturalWidth, height / image.naturalHeight);
+  const drawWidth = image.naturalWidth * scale;
+  const drawHeight = image.naturalHeight * scale;
+  context.drawImage(image, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
+}
+
 async function prepareTemplateImage(file) {
   if (file.size > 10 * 1024 * 1024) throw new Error("Template is too large");
   const source = await fileToDataUrl(file);
@@ -955,4 +1148,53 @@ async function compressImage(file, maxDimension = 1400, quality = 0.8) {
   canvas.height = Math.max(1, Math.round(bitmap.naturalHeight * scale));
   canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL("image/jpeg", quality);
+}
+
+function readVideoMetadata(file) {
+  return new Promise((resolve, reject) => {
+    const source = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    const cleanup = () => URL.revokeObjectURL(source);
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      const duration = Number(video.duration);
+      const width = Number(video.videoWidth);
+      const height = Number(video.videoHeight);
+      cleanup();
+      if (!Number.isFinite(duration) || duration <= 0 || !width || !height) {
+        reject(new Error("The video metadata could not be read."));
+        return;
+      }
+      resolve({ duration, width, height });
+    };
+    video.onerror = () => {
+      cleanup();
+      reject(new Error("That video cannot be read by this browser."));
+    };
+    video.src = source;
+  });
+}
+
+function sanitizeFileName(name) {
+  const safe = String(name || "campaign-video.mp4")
+    .normalize("NFKD")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return (safe || "campaign-video.mp4").slice(-120);
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const minutes = Math.floor(total / 60);
+  return `${minutes}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function formatFileSize(bytes) {
+  const megabytes = Number(bytes || 0) / (1024 * 1024);
+  return `${megabytes >= 10 ? megabytes.toFixed(0) : megabytes.toFixed(1)} MB`;
+}
+
+function destinationLabel(destination) {
+  return destination === "story" ? "My Day" : "Facebook Feed";
 }

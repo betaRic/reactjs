@@ -7,7 +7,7 @@ export async function GET(request) {
   try {
     const config = getFacebookConfig({ allowMissing: true });
     if (!config.configured) {
-      return Response.json({ ok: true, configured: false, missing: config.missing });
+      return Response.json({ ok: true, configured: false, missing: config.missing, videoStorageConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN) });
     }
     requirePublishAccess(request, config);
     const page = await getPageIdentity(config);
@@ -16,6 +16,7 @@ export async function GET(request) {
       configured: true,
       connected: true,
       graphVersion: config.graphVersion,
+      videoStorageConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN),
       page: {
         id: page.id,
         name: page.name,
