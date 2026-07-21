@@ -1,7 +1,6 @@
 import "./globals.css";
 
-const productionHost = process.env.VERCEL_PROJECT_PRODUCTION_URL;
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || (productionHost ? `https://${productionHost}` : "http://localhost:3000");
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://socialmedia-dilg12.vercel.app";
 
 export const metadata = {
   metadataBase: new URL(siteUrl),
