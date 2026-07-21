@@ -8,7 +8,7 @@ const daysFromNow = (days, hour = 9) => {
 };
 
 export const INITIAL_STATE = {
-  version: 1,
+  version: 2,
   settings: {
     organization: "DILG Region XII",
     pageName: "DILG Region XII",
@@ -52,7 +52,7 @@ export const INITIAL_STATE = {
       id: "campaign-1",
       title: "Barangay Disaster Preparedness Forum",
       caption:
-        "Stronger communities begin with prepared citizens. Today, we joined barangay leaders and volunteers for a practical disaster preparedness forum focused on coordination, readiness, and responsive local governance.\n\n#DILGGensan #SerbisyongMatino #DisasterPreparedness",
+        "Stronger communities begin with prepared citizens. Today, we joined barangay leaders and volunteers for a practical disaster preparedness forum focused on coordination, readiness, and responsive local governance.\n\n#DILGRegionXII #SerbisyongMatino #DisasterPreparedness",
       status: "Ready for review",
       templateId: "template-feed",
       scheduledFor: daysFromNow(0, 15),
@@ -67,7 +67,7 @@ export const INITIAL_STATE = {
       id: "campaign-2",
       title: "KALINISAN Community Clean-up",
       caption:
-        "Clean surroundings reflect a community that cares. Thank you to every volunteer who showed up and worked together for a cleaner, safer General Santos City.\n\n#KALINISAN #DILGGensan",
+        "Clean surroundings reflect a community that cares. Thank you to every volunteer who showed up and worked together for cleaner, safer communities across Region XII.\n\n#KALINISAN #DILGRegionXII",
       status: "Scheduled",
       templateId: "template-landscape",
       scheduledFor: daysFromNow(1, 10),
@@ -114,10 +114,15 @@ export function loadStudioState() {
     const saved = window.localStorage.getItem(STORAGE_KEY);
     if (!saved) return INITIAL_STATE;
     const parsed = JSON.parse(saved);
+    const settings = { ...INITIAL_STATE.settings, ...parsed.settings };
+    if (settings.organization === "DILG General Santos City") settings.organization = "DILG Region XII";
+    if (settings.pageName === "DILG General Santos City") settings.pageName = "DILG Region XII";
+    if (settings.pageHandle === "@DILGGensan") settings.pageHandle = "@DILGRegionXII";
     return {
       ...INITIAL_STATE,
       ...parsed,
-      settings: { ...INITIAL_STATE.settings, ...parsed.settings },
+      version: INITIAL_STATE.version,
+      settings,
       templates: Array.isArray(parsed.templates) ? parsed.templates : INITIAL_STATE.templates,
       campaigns: Array.isArray(parsed.campaigns) ? parsed.campaigns : INITIAL_STATE.campaigns,
       activity: Array.isArray(parsed.activity) ? parsed.activity : INITIAL_STATE.activity,

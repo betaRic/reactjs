@@ -15,6 +15,7 @@ import {
   ChevronRight,
   CircleDashed,
   Clock3,
+  Copy,
   Crop,
   Download,
   CloudUpload,
@@ -368,6 +369,7 @@ export default function StudioApp() {
   if (!studio) return <LoadingScreen />;
 
   const selectedFacebookPage = facebookDirectory.pages.find((page) => page.id === facebookDirectory.selectedPageId) || facebookDirectory.pages[0] || null;
+  const activeOrganization = selectedFacebookPage?.name || studio.settings.organization;
 
   const viewProps = {
     studio,
@@ -389,7 +391,7 @@ export default function StudioApp() {
       <Sidebar
         activeView={activeView}
         setActiveView={setActiveView}
-        organization={studio.settings.organization}
+        organization={activeOrganization}
         openComposer={() => openComposer()}
         mobileMenuOpen={mobileMenuOpen}
         setMobileMenuOpen={setMobileMenuOpen}
@@ -398,7 +400,7 @@ export default function StudioApp() {
       <main className="main-panel">
         <Topbar
           activeView={activeView}
-          organization={studio.settings.organization}
+          organization={activeOrganization}
           setMobileMenuOpen={setMobileMenuOpen}
           openComposer={() => openComposer()}
         />
@@ -688,7 +690,7 @@ function Templates({ studio, setStudio }) {
   }
   return (
     <div className="content-stack">
-      <PageIntro title="Brand templates" text="Keep every post recognizable with approved frames and layouts." action="Upload template" onAction={() => fileRef.current?.click()} />
+      <PageIntro title="Brand templates" text="Upload the approved frame for each office. The included Gensan layouts are editable samples and can be replaced or deleted." action="Upload template" onAction={() => fileRef.current?.click()} />
       <input ref={fileRef} type="file" accept="image/*" hidden onChange={addTemplate} />
       <div className="template-grid">
         {studio.templates.map((template) => {
@@ -777,7 +779,7 @@ function SettingsView({ studio, setStudio, publishKey, setPublishKey, facebookDi
   }
   return (
     <div className="content-stack settings-width">
-      <PageIntro title="Settings" text="Manage your page identity, workflow, and device-local data." />
+      <PageIntro title="Settings" text="Manage the Region XII connection, selected Facebook Page, workflow, and local workspace." />
       <section className="settings-section panel">
         <div className="settings-title"><div className="settings-glyph indigo"><MessageSquareText size={20} /></div><div><h3>Workspace identity</h3><p>Shown throughout the studio and in post previews.</p></div></div>
         <div className="form-grid two-columns">
@@ -884,11 +886,11 @@ function FacebookConnection({ publishKey, setPublishKey, facebookDirectory, setF
           </div>
         )
       ) : (
-        <div className="oauth-setup-note"><ShieldCheck size={19} /><div><strong>Multi-Page connection needs one-time administrator setup</strong><span>Add a Meta app, encryption key, and Vercel Postgres connection. Missing server variables: {facebookDirectory.missing.join(", ") || "configuration unavailable"}.</span></div></div>
+        <FacebookAdminSetup missing={facebookDirectory.missing} onRefresh={refreshFacebookDirectory} />
       )}
 
       <details className="legacy-connection">
-        <summary>Legacy single-Page connection</summary>
+        <summary>Temporary single-Page fallback — not for the regional rollout</summary>
         <div className="connection-layout">
           <Field label="Session publishing key" hint="Optional fallback"><div className="secure-input"><KeyRound size={17} /><input type="password" autoComplete="off" value={publishKey} onChange={(event) => setPublishKey(event.target.value)} placeholder="Enter the key configured in Vercel" /></div></Field>
           <button className="secondary-button connection-check" onClick={checkConnection} disabled={checking || (!publishKey && !facebookDirectory.connected)}>{checking ? <Loader2 className="spin" size={17} /> : <Wifi size={17} />} Test connection</button>
@@ -901,6 +903,74 @@ function FacebookConnection({ publishKey, setPublishKey, facebookDirectory, setF
       {connection && !connection.connected && <div className="connection-error">{connection.configured === false ? `Server variables still needed: ${connection.missing.join(", ")}` : connection.error}</div>}
       {facebookDirectory.error && <div className="connection-error">{facebookDirectory.error} <button type="button" onClick={() => refreshFacebookDirectory().catch(() => {})}>Try again</button></div>}
     </section>
+  );
+}
+
+function FacebookAdminSetup({ missing = [], onRefresh }) {
+  const [copied, setCopied] = useState("");
+  const callbackUrl = typeof window === "undefined"
+    ? "https://socialmedia-dilg12.vercel.app/api/facebook/oauth/callback"
+    : `${window.location.origin}/api/facebook/oauth/callback`;
+  const requiredVariables = ["FACEBOOK_APP_ID", "FACEBOOK_APP_SECRET", "FACEBOOK_TOKEN_ENCRYPTION_KEY", "DATABASE_URL"];
+  const configuredCount = requiredVariables.filter((name) => !missing.includes(name)).length;
+
+  async function copyValue(value, label) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(label);
+      toast.success(`${label} copied.`);
+      window.setTimeout(() => setCopied(""), 1800);
+    } catch {
+      toast.error("Copying was blocked by the browser. Select and copy the value manually.");
+    }
+  }
+
+  return (
+    <div className="admin-setup-guide">
+      <div className="regional-integration-model">
+        <div><span>1</span><strong>One Region XII Meta app</strong><small>Shared secure infrastructure</small></div>
+        <ArrowRight size={18} />
+        <div><span>2</span><strong>Staff connect Facebook</strong><small>No Page tokens entered</small></div>
+        <ArrowRight size={18} />
+        <div><span>3</span><strong>Choose an authorized Page</strong><small>Province, city, or regional</small></div>
+      </div>
+
+      <div className="setup-guide-heading">
+        <div><span className="section-kicker"><ShieldCheck size={14} /> Regional administrator setup</span><h4>Configure the connection once for every Region XII office</h4><p>These variables identify and protect the platform itself. They do not lock the app to Gensan or to any single Facebook Page.</p></div>
+        <strong>{configuredCount} / {requiredVariables.length} ready</strong>
+      </div>
+
+      <div className="setup-variable-grid" aria-label="Server configuration status">
+        {requiredVariables.map((name) => {
+          const ready = !missing.includes(name);
+          return <span key={name} className={clsx("setup-variable", ready && "ready")}>{ready ? <CheckCircle2 size={14} /> : <CircleDashed size={14} />} {name}</span>;
+        })}
+      </div>
+
+      <ol className="administrator-steps">
+        <li>
+          <span>1</span>
+          <div><strong>Create one Meta app owned by the Region XII administrator</strong><p>Enable Facebook Login and request <code>pages_show_list</code>, <code>pages_manage_posts</code>, and <code>pages_read_engagement</code>. This one app can serve every office.</p><a href="https://developers.facebook.com/apps/" target="_blank" rel="noreferrer">Open Meta for Developers <ExternalLink size={14} /></a></div>
+        </li>
+        <li>
+          <span>2</span>
+          <div><strong>Add the production callback URL in Meta</strong><p>Use this exact URL under the Facebook Login valid OAuth redirect URIs.</p><div className="copy-setting"><code>{callbackUrl}</code><button type="button" onClick={() => copyValue(callbackUrl, "Callback URL")}>{copied === "Callback URL" ? <Check size={15} /> : <Copy size={15} />} {copied === "Callback URL" ? "Copied" : "Copy"}</button></div></div>
+        </li>
+        <li>
+          <span>3</span>
+          <div><strong>Connect one Postgres database to the Vercel project</strong><p>In Vercel Marketplace, add a Postgres provider such as Neon and connect it to this project. The integration supplies <code>DATABASE_URL</code>; the database safely separates each browser session and its authorized Pages.</p><a href="https://vercel.com/docs/postgres" target="_blank" rel="noreferrer">Open Vercel Postgres guide <ExternalLink size={14} /></a></div>
+        </li>
+        <li>
+          <span>4</span>
+          <div><strong>Add the three Meta security values in Vercel</strong><p>Open this project’s Settings → Environment Variables and add <code>FACEBOOK_APP_ID</code>, <code>FACEBOOK_APP_SECRET</code>, and a long random <code>FACEBOOK_TOKEN_ENCRYPTION_KEY</code>. Mark secrets as sensitive, apply them to Production, and redeploy.</p><a href="https://vercel.com/dashboard" target="_blank" rel="noreferrer">Open Vercel dashboard <ExternalLink size={14} /></a></div>
+        </li>
+      </ol>
+
+      <div className="setup-guide-footer">
+        <div><KeyRound size={18} /><p><strong>Do not place these secrets or Facebook Page tokens in this screen.</strong> After setup, each office clicks “Connect with Facebook” and sees only Pages its staff account is allowed to manage.</p></div>
+        <button className="secondary-button" type="button" onClick={() => onRefresh().catch(() => {})}><RefreshCcw size={16} /> Check setup again</button>
+      </div>
+    </div>
   );
 }
 

@@ -40,6 +40,8 @@ The current production URL is `https://socialmedia-dilg12.vercel.app/`.
 
 This is the recommended setup for Province, City, and Regional Office Pages. Each authorized staff member connects their Facebook account, sees the Pages they are allowed to manage, and selects the current publishing Page in **Settings → Facebook Pages**.
 
+The four connection variables configure one shared Region XII integration, not one Page. `FACEBOOK_APP_ID` and `FACEBOOK_APP_SECRET` identify the Meta app; `FACEBOOK_TOKEN_ENCRYPTION_KEY` protects stored Page tokens; and `DATABASE_URL` stores separate encrypted connections. Do not create Page-specific environment variables. After the administrator completes this setup once, each office uses the in-app Facebook login and can access only Pages its staff account is permitted to manage.
+
 1. Create or configure a Meta app with Facebook Login and the permissions `pages_show_list`, `pages_manage_posts`, and `pages_read_engagement`.
 2. Add this exact production redirect URI in the Meta app: `https://socialmedia-dilg12.vercel.app/api/facebook/oauth/callback`.
 3. In Vercel Marketplace, connect a Postgres provider to the project so Vercel supplies `DATABASE_URL`.
