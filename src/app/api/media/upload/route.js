@@ -1,5 +1,6 @@
 import { handleUpload } from "@vercel/blob/client";
-import { getFacebookConfig, verifyPublishKeyValue } from "@/lib/facebook-server";
+import { authorizeMediaUpload } from "@/lib/facebook-request";
+import { FacebookApiError } from "@/lib/facebook-server";
 
 export const runtime = "nodejs";
 
@@ -13,7 +14,7 @@ export async function POST(request) {
       request,
       onBeforeGenerateToken: async (pathname, clientPayload) => {
         const payload = safeJson(clientPayload);
-        verifyPublishKeyValue(payload.publishKey, getFacebookConfig());
+        await authorizeMediaUpload(request, payload.publishKey);
         if (!pathname.startsWith("campaign-videos/")) throw new Error("Invalid video upload path.");
         return {
           allowedContentTypes: ["video/mp4", "video/quicktime", "video/webm"],
@@ -26,7 +27,8 @@ export async function POST(request) {
     });
     return Response.json(response);
   } catch (error) {
-    return Response.json({ error: error.message || "The video could not be uploaded." }, { status: Number(error?.status) || 400 });
+    const message = error instanceof FacebookApiError ? error.message : "The video upload could not be authorized.";
+    return Response.json({ error: message }, { status: Number(error?.status) || 400 });
   }
 }
 

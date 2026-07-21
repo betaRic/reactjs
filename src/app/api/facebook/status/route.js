@@ -1,20 +1,24 @@
-import { getFacebookConfig, getPageIdentity, requirePublishAccess, toRouteError } from "@/lib/facebook-server";
+import { getFacebookOAuthReadiness } from "@/lib/facebook-connections";
+import { resolveFacebookConfig } from "@/lib/facebook-request";
+import { getPageIdentity, toRouteError } from "@/lib/facebook-server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request) {
   try {
-    const config = getFacebookConfig({ allowMissing: true });
+    const config = await resolveFacebookConfig(request, { allowMissing: true });
     if (!config.configured) {
-      return Response.json({ ok: true, configured: false, missing: config.missing, videoStorageConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN) });
+      const oauth = getFacebookOAuthReadiness();
+      return Response.json({ ok: true, configured: false, missing: config.missing, oauthAvailable: oauth.available, oauthMissing: oauth.missing, connectionRequired: config.connectionRequired, videoStorageConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN) });
     }
-    requirePublishAccess(request, config);
     const page = await getPageIdentity(config);
     return Response.json({
       ok: true,
       configured: true,
       connected: true,
+      mode: config.mode,
+      oauthAvailable: config.oauthAvailable,
       graphVersion: config.graphVersion,
       videoStorageConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN),
       page: {

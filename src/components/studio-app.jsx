@@ -76,6 +76,7 @@ const navigation = [
 
 const campaignFilters = ["All", "Draft", "Ready for review", "Scheduled", "Published"];
 const PUBLISH_KEY_STORAGE = "dilg-social-studio:publish-key";
+const EMPTY_FACEBOOK_DIRECTORY = { loading: true, available: false, connected: false, missing: [], pages: [], selectedPageId: "", user: null };
 const DEFAULT_PHOTO_EDIT = { zoom: 1, positionX: 50, positionY: 50, rotation: 0 };
 const DEFAULT_EVENT_OVERLAY = { enabled: false, title: "", date: "", location: "", position: "bottom-left" };
 const browserImageCache = new Map();
@@ -100,6 +101,7 @@ export default function StudioApp() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [draft, setDraft] = useState(emptyDraft());
   const [publishKey, setPublishKey] = useState("");
+  const [facebookDirectory, setFacebookDirectory] = useState(EMPTY_FACEBOOK_DIRECTORY);
   const [publishing, setPublishing] = useState(false);
   const [publishProgress, setPublishProgress] = useState("");
 
@@ -107,6 +109,19 @@ export default function StudioApp() {
     const frame = window.requestAnimationFrame(() => {
       setStudio(loadStudioState());
       setPublishKey(window.sessionStorage.getItem(PUBLISH_KEY_STORAGE) || "");
+      requestJson("/api/facebook/connections")
+        .then((directory) => setFacebookDirectory({ ...directory, loading: false }))
+        .catch((error) => setFacebookDirectory({ ...EMPTY_FACEBOOK_DIRECTORY, loading: false, error: error.message }));
+
+      const url = new URL(window.location.href);
+      const facebookResult = url.searchParams.get("facebook");
+      if (facebookResult) {
+        setActiveView("settings");
+        if (facebookResult === "connected") toast.success("Facebook connected. Choose the Page this workspace should publish to.");
+        else toast.error("Facebook could not be connected. Please try again or ask an administrator to check the Meta app settings.", { duration: 8000 });
+        url.searchParams.delete("facebook");
+        window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+      }
     });
     return () => window.cancelAnimationFrame(frame);
   }, []);
@@ -139,6 +154,18 @@ export default function StudioApp() {
     setPublishKey(value);
     if (value) window.sessionStorage.setItem(PUBLISH_KEY_STORAGE, value);
     else window.sessionStorage.removeItem(PUBLISH_KEY_STORAGE);
+  }
+
+  async function refreshFacebookDirectory() {
+    setFacebookDirectory((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const directory = await requestJson("/api/facebook/connections");
+      setFacebookDirectory({ ...directory, loading: false });
+      return directory;
+    } catch (error) {
+      setFacebookDirectory((current) => ({ ...current, loading: false, error: error.message }));
+      throw error;
+    }
   }
 
   function saveCampaign(nextStatus = draft.status || "Draft", extra = {}) {
@@ -195,10 +222,6 @@ export default function StudioApp() {
   async function publishCampaign() {
     if (!draft.title.trim() || draft.images.length === 0) {
       toast.error("Add a title and at least one photo or video before publishing.");
-      return;
-    }
-    if (!publishKey) {
-      toast.error("Add your session publishing key in Settings before posting.");
       return;
     }
     const destinations = draft.destinations?.length ? draft.destinations : [];
@@ -297,6 +320,8 @@ export default function StudioApp() {
         facebookPermalink: results.feed?.permalink || "",
         facebookStoryId: results.story?.storyId || "",
         publishedDestinations: [results.feed && "feed", results.story && "story"].filter(Boolean),
+        facebookPageId: selectedFacebookPage?.id || "",
+        facebookPageName: selectedFacebookPage?.name || "",
       });
       if (errors.length) toast.warning(`Published partially. ${errors.map((item) => `${destinationLabel(item.destination)}: ${item.message}`).join(" · ")}`, { duration: 9000 });
     } catch (error) {
@@ -342,6 +367,8 @@ export default function StudioApp() {
 
   if (!studio) return <LoadingScreen />;
 
+  const selectedFacebookPage = facebookDirectory.pages.find((page) => page.id === facebookDirectory.selectedPageId) || facebookDirectory.pages[0] || null;
+
   const viewProps = {
     studio,
     setStudio,
@@ -351,6 +378,9 @@ export default function StudioApp() {
     deleteCampaign,
     publishKey,
     setPublishKey: updatePublishKey,
+    facebookDirectory,
+    setFacebookDirectory,
+    refreshFacebookDirectory,
   };
 
   return (
@@ -399,6 +429,7 @@ export default function StudioApp() {
             templates={studio.templates}
             settings={studio.settings}
             publishKey={publishKey}
+            facebookPage={selectedFacebookPage}
             publishing={publishing}
             publishProgress={publishProgress}
             onClose={() => setComposerOpen(false)}
@@ -422,7 +453,7 @@ function Sidebar({ activeView, setActiveView, organization, openComposer, mobile
       <aside className={clsx("sidebar", mobileMenuOpen && "is-open")}>
         <div className="brand-lockup">
           <div className="brand-mark"><img src="/brand/dilg-logo.png" alt="DILG seal" /></div>
-          <div><strong>Social Studio</strong><span>DILG Gensan</span></div>
+          <div><strong>Social Studio</strong><span>{organization}</span></div>
         </div>
         <button className="new-campaign-button" onClick={openComposer} type="button">
           <Plus size={18} /> New campaign
@@ -705,7 +736,7 @@ function ActivityView({ studio }) {
   );
 }
 
-function SettingsView({ studio, setStudio, publishKey, setPublishKey }) {
+function SettingsView({ studio, setStudio, publishKey, setPublishKey, facebookDirectory, setFacebookDirectory, refreshFacebookDirectory }) {
   const importRef = useRef(null);
   const [settings, setSettings] = useState(studio.settings);
   function save() {
@@ -751,12 +782,12 @@ function SettingsView({ studio, setStudio, publishKey, setPublishKey }) {
         <div className="settings-title"><div className="settings-glyph indigo"><MessageSquareText size={20} /></div><div><h3>Workspace identity</h3><p>Shown throughout the studio and in post previews.</p></div></div>
         <div className="form-grid two-columns">
           <Field label="Organization"><input value={settings.organization} onChange={(event) => setSettings({ ...settings, organization: event.target.value })} /></Field>
-          <Field label="Facebook page name"><input value={settings.pageName} onChange={(event) => setSettings({ ...settings, pageName: event.target.value })} /></Field>
+          <Field label="Preview Page name" hint="Used only when no Page is connected"><input value={settings.pageName} onChange={(event) => setSettings({ ...settings, pageName: event.target.value })} /></Field>
           <Field label="Page handle"><input value={settings.pageHandle} onChange={(event) => setSettings({ ...settings, pageHandle: event.target.value })} /></Field>
           <Field label="Default template"><select value={settings.defaultTemplateId} onChange={(event) => setSettings({ ...settings, defaultTemplateId: event.target.value })}>{studio.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></Field>
         </div>
       </section>
-      <FacebookConnection publishKey={publishKey} setPublishKey={setPublishKey} />
+      <FacebookConnection publishKey={publishKey} setPublishKey={setPublishKey} facebookDirectory={facebookDirectory} setFacebookDirectory={setFacebookDirectory} refreshFacebookDirectory={refreshFacebookDirectory} />
       <section className="settings-section panel">
         <div className="settings-title"><div className="settings-glyph amber"><ShieldCheck size={20} /></div><div><h3>Publishing workflow</h3><p>Control the checks content passes before publishing.</p></div></div>
         <ToggleRow title="Require approval" text="Campaigns must be marked approved before publishing." checked={settings.approvalRequired} onChange={(value) => setSettings({ ...settings, approvalRequired: value })} />
@@ -765,22 +796,55 @@ function SettingsView({ studio, setStudio, publishKey, setPublishKey }) {
       <section className="settings-section panel">
         <div className="settings-title"><div className="settings-glyph emerald"><Download size={20} /></div><div><h3>Local data</h3><p>Everything is stored in this browser. Keep a backup when moving devices.</p></div></div>
         <div className="data-actions"><button className="secondary-button" onClick={exportData}><Download size={17} /> Export backup</button><button className="secondary-button" onClick={() => importRef.current?.click()}><Upload size={17} /> Import backup</button><button className="danger-button" onClick={reset}><Trash2 size={17} /> Reset workspace</button><input ref={importRef} type="file" accept="application/json" hidden onChange={importData} /></div>
-        <div className="security-note"><ShieldCheck size={18} /><span><strong>The Facebook Page token stays on the server.</strong> It is read only by secured Next.js routes from Vercel environment variables and is never sent to the browser or included in backups.</span></div>
+        <div className="security-note"><ShieldCheck size={18} /><span><strong>Facebook Page tokens stay on the server.</strong> Connected tokens are encrypted before database storage and are never sent to the browser or included in local backups. Legacy environment tokens also remain server-only.</span></div>
       </section>
       <div className="settings-save"><button className="primary-button" onClick={save}><Check size={17} /> Save settings</button></div>
     </div>
   );
 }
 
-function FacebookConnection({ publishKey, setPublishKey }) {
+function FacebookConnection({ publishKey, setPublishKey, facebookDirectory, setFacebookDirectory, refreshFacebookDirectory }) {
   const [checking, setChecking] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const [connection, setConnection] = useState(null);
+  const selectedPage = facebookDirectory.pages.find((page) => page.id === facebookDirectory.selectedPageId) || facebookDirectory.pages[0] || null;
+
+  async function choosePage(pageId) {
+    if (!pageId || pageId === facebookDirectory.selectedPageId) return;
+    setSwitching(true);
+    try {
+      const directory = await requestJson("/api/facebook/connections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pageId }),
+      });
+      setFacebookDirectory({ ...directory, loading: false });
+      setConnection(null);
+      toast.success(`Publishing Page changed to ${directory.pages.find((page) => page.id === pageId)?.name || "the selected Page"}.`);
+    } catch (error) {
+      toast.error(error.message, { duration: 7000 });
+    } finally { setSwitching(false); }
+  }
+
+  async function disconnect() {
+    if (!window.confirm("Disconnect this Facebook account from this browser? Stored Page connections for this session will be removed.")) return;
+    setSwitching(true);
+    try {
+      await requestJson("/api/facebook/connections", { method: "DELETE" });
+      setFacebookDirectory({ ...EMPTY_FACEBOOK_DIRECTORY, loading: false, available: facebookDirectory.available, missing: facebookDirectory.missing });
+      setConnection(null);
+      toast.success("Facebook disconnected from this browser.");
+    } catch (error) {
+      toast.error(error.message, { duration: 7000 });
+    } finally { setSwitching(false); }
+  }
+
   async function checkConnection() {
     setChecking(true);
     try {
       const result = await requestJson("/api/facebook/status", { headers: { "x-publish-key": publishKey } });
       setConnection(result);
-      if (!result.configured) toast.error(`Vercel is missing: ${result.missing.join(", ")}`);
+      if (!result.configured) toast.error(result.connectionRequired ? "Connect a Facebook Page before testing." : `Vercel is missing: ${result.missing.join(", ")}`);
       else if (!result.videoStorageConfigured) toast.warning(`Connected to ${result.page.name}. Add a public Vercel Blob store to enable video uploads.`);
       else toast.success(`Connected to ${result.page.name}.`);
     } catch (error) {
@@ -790,20 +854,57 @@ function FacebookConnection({ publishKey, setPublishKey }) {
   }
   return (
     <section className="settings-section panel facebook-connection-card">
-      <div className="settings-title"><div className="settings-glyph sky"><Wifi size={20} /></div><div><h3>Facebook connection</h3><p>Secure live publishing through Meta’s Pages API and Vercel.</p></div>{connection?.connected && <span className="connection-badge connected"><CheckCircle2 size={15} /> Connected</span>}</div>
-      <div className="connection-layout">
-        <Field label="Session publishing key" hint="Never included in local backups"><div className="secure-input"><KeyRound size={17} /><input type="password" autoComplete="off" value={publishKey} onChange={(event) => setPublishKey(event.target.value)} placeholder="Enter the key configured in Vercel" /></div></Field>
-        <button className="secondary-button connection-check" onClick={checkConnection} disabled={checking || !publishKey}>{checking ? <Loader2 className="spin" size={17} /> : <Wifi size={17} />} Test connection</button>
-      </div>
-      <p className="session-key-note">This key authorizes your current browser tab to use the server connection. It is stored only in session storage and clears when the browser session ends.</p>
-      {connection?.connected && <div className="connected-page"><div className="connected-page-avatar">{connection.page.picture ? <img src={connection.page.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>{connection.page.name}</strong><span>Page ID {connection.page.id} · Graph API {connection.graphVersion}</span></div>{connection.page.link && <a href={connection.page.link} target="_blank" rel="noreferrer">Open Page <ExternalLink size={14} /></a>}</div>}
+      <div className="settings-title"><div className="settings-glyph sky"><Wifi size={20} /></div><div><h3>Facebook Pages</h3><p>Connect once, then choose any Province or Regional Office Page you manage.</p></div>{facebookDirectory.connected && <span className="connection-badge connected"><CheckCircle2 size={15} /> Connected</span>}</div>
+
+      {facebookDirectory.loading ? (
+        <div className="connection-loading"><Loader2 className="spin" size={19} /> Loading Facebook connection…</div>
+      ) : facebookDirectory.available ? (
+        facebookDirectory.connected ? (
+          <div className="oauth-connected-layout">
+            <div className="connected-user"><BadgeCheck size={18} /><span>Connected as <strong>{facebookDirectory.user?.name || "Facebook user"}</strong></span></div>
+            <div className="page-switcher">
+              <Field label="Publishing Page" hint={`${facebookDirectory.pages.length} available`}>
+                <select value={selectedPage?.id || ""} onChange={(event) => choosePage(event.target.value)} disabled={switching}>
+                  {facebookDirectory.pages.map((page) => <option key={page.id} value={page.id}>{page.name}</option>)}
+                </select>
+              </Field>
+              {switching && <Loader2 className="spin page-switcher-loader" size={18} />}
+            </div>
+            {selectedPage && <div className="connected-page"><div className="connected-page-avatar">{selectedPage.picture ? <img src={selectedPage.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>{selectedPage.name}</strong><span>Page ID {selectedPage.id} · selected for Feed and My Day publishing</span></div></div>}
+            <div className="connection-actions">
+              <button className="secondary-button" onClick={checkConnection} disabled={checking || switching}>{checking ? <Loader2 className="spin" size={17} /> : <Wifi size={17} />} Test selected Page</button>
+              <a className="secondary-button" href="/api/facebook/oauth/start"><RefreshCcw size={17} /> Refresh Pages</a>
+              <button className="danger-button" onClick={disconnect} disabled={switching}><Trash2 size={17} /> Disconnect</button>
+            </div>
+          </div>
+        ) : (
+          <div className="oauth-connection-hero">
+            <div><strong>Connect your authorized Facebook account</strong><p>The app will show only Pages your account can manage. You can switch between Province, City, and Regional Office Pages before publishing.</p></div>
+            <a className="primary-button facebook-connect-button" href="/api/facebook/oauth/start"><ExternalLink size={17} /> Connect with Facebook</a>
+          </div>
+        )
+      ) : (
+        <div className="oauth-setup-note"><ShieldCheck size={19} /><div><strong>Multi-Page connection needs one-time administrator setup</strong><span>Add a Meta app, encryption key, and Vercel Postgres connection. Missing server variables: {facebookDirectory.missing.join(", ") || "configuration unavailable"}.</span></div></div>
+      )}
+
+      <details className="legacy-connection">
+        <summary>Legacy single-Page connection</summary>
+        <div className="connection-layout">
+          <Field label="Session publishing key" hint="Optional fallback"><div className="secure-input"><KeyRound size={17} /><input type="password" autoComplete="off" value={publishKey} onChange={(event) => setPublishKey(event.target.value)} placeholder="Enter the key configured in Vercel" /></div></Field>
+          <button className="secondary-button connection-check" onClick={checkConnection} disabled={checking || (!publishKey && !facebookDirectory.connected)}>{checking ? <Loader2 className="spin" size={17} /> : <Wifi size={17} />} Test connection</button>
+        </div>
+        <p className="session-key-note">Use this only while the old single-Page environment-token setup is active. The key stays in session storage and clears when the browser session ends.</p>
+      </details>
+
+      {connection?.connected && <div className="connected-page test-result"><div className="connected-page-avatar">{connection.page.picture ? <img src={connection.page.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>Connection test passed: {connection.page.name}</strong><span>Page ID {connection.page.id} · Graph API {connection.graphVersion} · {connection.mode === "oauth" ? "secure account connection" : "legacy environment token"}</span></div>{connection.page.link && <a href={connection.page.link} target="_blank" rel="noreferrer">Open Page <ExternalLink size={14} /></a>}</div>}
       {connection?.connected && <div className={clsx("video-storage-status", connection.videoStorageConfigured ? "ready" : "missing")}><CloudUpload size={17} /><div><strong>{connection.videoStorageConfigured ? "Video storage ready" : "Video storage not connected"}</strong><span>{connection.videoStorageConfigured ? "Vercel Blob can accept campaign videos." : "Create a public Vercel Blob store to enable video uploads."}</span></div></div>}
       {connection && !connection.connected && <div className="connection-error">{connection.configured === false ? `Server variables still needed: ${connection.missing.join(", ")}` : connection.error}</div>}
+      {facebookDirectory.error && <div className="connection-error">{facebookDirectory.error} <button type="button" onClick={() => refreshFacebookDirectory().catch(() => {})}>Try again</button></div>}
     </section>
   );
 }
 
-function Composer({ draft, setDraft, templates, settings, publishKey, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
+function Composer({ draft, setDraft, templates, settings, publishKey, facebookPage, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
   const fileRef = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -812,12 +913,14 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
   const activeTemplate = templates.find((item) => item.id === draft.templateId) || templates[0];
   const hasVideo = draft.images.some((item) => item.type === "video");
   const editingImage = draft.images.find((item) => item.id === editingImageId && item.type !== "video");
+  const publishingIdentity = facebookPage?.name || settings.organization || "DILG Region XII";
+  const organizationHashtag = `#${publishingIdentity.replace(/[^A-Za-z0-9]/g, "") || "DILGRegionXII"}`;
+  const defaultLocation = publishingIdentity.replace(/^DILG\s*/i, "").trim() || "Region XII";
   async function addMedia(files) {
     const selected = [...files];
     const videoFiles = selected.filter((file) => file.type.startsWith("video/"));
     if (videoFiles.length) {
       if (selected.length !== 1 || draft.images.length) return toast.error("A video campaign can contain one video and no photos.");
-      if (!publishKey) return toast.error("Enter your session publishing key in Settings before uploading a video.");
       const file = videoFiles[0];
       if (!["video/mp4", "video/quicktime", "video/webm"].includes(file.type)) return toast.error("Use an MP4, MOV, or WebM video.");
       if (file.size > 500 * 1024 * 1024) return toast.error("Videos must be smaller than 500 MB.");
@@ -954,14 +1057,14 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
             <section className="composer-section">
               <div className="step-heading"><span>3</span><div><h3>Caption and event details</h3><p>Write the post, then optionally add an event banner to every photo.</p></div></div>
               <Field label="Post copy" hint={`${draft.caption.length} / 2,200`}><textarea rows={7} value={draft.caption} onChange={(event) => setDraft({ ...draft, caption: event.target.value.slice(0, 2200) })} placeholder="Share the story behind this update…" /></Field>
-              <div className="caption-tools"><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}#DILGGensan #SerbisyongMatino` })}># Add hashtags</button><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}📍 General Santos City` })}>Add location</button></div>
+              <div className="caption-tools"><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}${organizationHashtag} #SerbisyongMatino` })}># Add hashtags</button><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}📍 ${defaultLocation}` })}>Add location</button></div>
               <div className={clsx("event-overlay-panel", hasVideo && "is-disabled")}>
                 <ToggleRow title="Event information overlay" text={hasVideo ? "Available for photo campaigns" : "Add the same event banner above every photo without changing the template."} checked={!hasVideo && draft.eventOverlay?.enabled} onChange={(enabled) => !hasVideo && updateEventOverlay({ enabled })} />
                 {!hasVideo && draft.eventOverlay?.enabled && (
                   <motion.div className="event-overlay-fields" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
                     <Field label="Event title" hint="Uses campaign title if blank"><input value={draft.eventOverlay.title} maxLength={120} onChange={(event) => updateEventOverlay({ title: event.target.value })} placeholder={draft.title || "Event title"} /></Field>
                     <Field label="Event date"><input type="date" value={draft.eventOverlay.date} onChange={(event) => updateEventOverlay({ date: event.target.value })} /></Field>
-                    <Field label="Location"><input value={draft.eventOverlay.location} maxLength={80} onChange={(event) => updateEventOverlay({ location: event.target.value })} placeholder="e.g. General Santos City" /></Field>
+                    <Field label="Location"><input value={draft.eventOverlay.location} maxLength={80} onChange={(event) => updateEventOverlay({ location: event.target.value })} placeholder={`e.g. ${defaultLocation}`} /></Field>
                     <Field label="Banner placement"><select value={normalizeEventOverlay(draft.eventOverlay).position} onChange={(event) => updateEventOverlay({ position: event.target.value })}><option value="top-left">Top left</option><option value="top-center">Top center</option><option value="top-right">Top right</option><option value="bottom-left">Bottom left</option><option value="bottom-center">Bottom center</option><option value="bottom-right">Bottom right</option></select></Field>
                   </motion.div>
                 )}
@@ -969,6 +1072,10 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
             </section>
             <section className="composer-section">
               <div className="step-heading"><span>4</span><div><h3>Choose where to publish</h3><p>Send this campaign to the Facebook Feed, My Day, or both.</p></div></div>
+              <div className={clsx("publishing-page-context", facebookPage && "is-connected")}>
+                <div className="connected-page-avatar">{facebookPage?.picture ? <img src={facebookPage.picture} alt="" /> : <MessageSquareText size={18} />}</div>
+                <div><strong>{facebookPage ? `Publishing as ${facebookPage.name}` : "No multi-Page destination selected"}</strong><span>{facebookPage ? "This Page will receive every selected destination below." : "Connect or select a Facebook Page in Settings. The legacy single-Page connection remains available as a fallback."}</span></div>
+              </div>
               <div className="destination-grid">
                 <button type="button" className={clsx("destination-card", draft.destinations?.includes("feed") && "selected")} aria-pressed={draft.destinations?.includes("feed")} onClick={() => toggleDestination("feed")}><span><Newspaper size={20} /></span><div><strong>Facebook Feed</strong><small>Permanent Page post</small></div><i>{draft.destinations?.includes("feed") && <Check size={14} />}</i></button>
                 <button type="button" className={clsx("destination-card", draft.destinations?.includes("story") && "selected")} aria-pressed={draft.destinations?.includes("story")} onClick={() => toggleDestination("story")}><span><Smartphone size={20} /></span><div><strong>My Day / Story</strong><small>Visible for 24 hours</small></div><i>{draft.destinations?.includes("story") && <Check size={14} />}</i></button>
@@ -980,7 +1087,7 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
           </div>
           <aside className="preview-column">
             <div className="preview-heading"><span>Live preview</span><small>Facebook feed</small></div>
-            <FacebookPreview draft={draft} settings={settings} template={activeTemplate} />
+            <FacebookPreview draft={draft} settings={settings} template={activeTemplate} facebookPage={facebookPage} />
             <div className="preview-note"><ShieldCheck size={17} /><span>Live publishing uses the secure Meta connection configured in Vercel.</span></div>
           </aside>
         </div>
@@ -1166,13 +1273,15 @@ function ComposedPhotoPreview({ media, template, eventOverlay, campaignTitle, cl
   return <canvas ref={canvasRef} className={className} role="img" aria-label="Edited photo with template and event overlay" />;
 }
 
-function FacebookPreview({ draft, settings, template }) {
+function FacebookPreview({ draft, settings, template, facebookPage }) {
   const primaryMedia = draft.images[0];
   const primaryImage = primaryMedia?.src;
   const isVideo = primaryMedia?.type === "video";
+  const pageName = facebookPage?.name || settings.pageName;
+  const pagePicture = facebookPage?.picture || "/brand/dilg-logo.png";
   return (
     <div className="facebook-preview">
-      <div className="fb-post-header"><div className="fb-avatar"><img src="/brand/dilg-logo.png" alt="" /></div><div><strong>{settings.pageName}</strong><span>Just now · <span aria-label="Public">🌐</span></span></div><MoreHorizontal size={18} /></div>
+      <div className="fb-post-header"><div className="fb-avatar"><img src={pagePicture} alt="" /></div><div><strong>{pageName}</strong><span>Just now · <span aria-label="Public">🌐</span></span></div><MoreHorizontal size={18} /></div>
       <div className={clsx("fb-caption", !draft.caption && "placeholder")}>{draft.caption || "Your caption will appear here as you write…"}</div>
       <div className="fb-media">
         {isVideo ? <video className="fb-source" src={primaryImage} controls playsInline preload="metadata" /> : primaryImage ? <ComposedPhotoPreview className="fb-source" media={primaryMedia} template={template} eventOverlay={draft.eventOverlay} campaignTitle={draft.title} /> : <div className="fb-empty"><ImagePlus size={28} /><span>Add photos or a video to preview the post</span></div>}

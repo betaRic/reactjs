@@ -1,12 +1,12 @@
-import { createPagePost, getFacebookConfig, requirePublishAccess, toRouteError } from "@/lib/facebook-server";
+import { resolveFacebookConfig } from "@/lib/facebook-request";
+import { createPagePost, toRouteError } from "@/lib/facebook-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
 export async function POST(request) {
   try {
-    const config = getFacebookConfig();
-    requirePublishAccess(request, config);
+    const config = await resolveFacebookConfig(request);
     const payload = await request.json();
     const message = String(payload?.message || "").trim();
     const mediaIds = Array.isArray(payload?.mediaIds)

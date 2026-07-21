@@ -1,6 +1,6 @@
 # DILG Social Studio
 
-A separate Next.js rebuild of the NAS5 Facebook Poster workflow for DILG General Santos City. The original NAS application remains untouched in the parent folder.
+A separate Next.js rebuild of the NAS5 Facebook Poster workflow for DILG offices across Region XII. The original NAS application remains untouched in the parent folder.
 
 ## Stack
 
@@ -10,6 +10,8 @@ A separate Next.js rebuild of the NAS5 Facebook Poster workflow for DILG General
 - Motion for page and composer transitions
 - Browser local storage for campaigns, photos, templates, settings, and activity
 - Vercel Blob direct uploads for campaign videos
+- Secure Meta OAuth with selectable Facebook Pages
+- Encrypted Page-token storage in Vercel Marketplace Postgres
 - Vercel-ready project structure
 
 ## Run locally
@@ -34,19 +36,30 @@ Import this repository in Vercel. The Next.js application is at the repository r
 
 The current production URL is `https://socialmedia-dilg12.vercel.app/`.
 
-### Secure Facebook publishing
+### Secure multi-Page Facebook publishing
 
-Add these variables in **Vercel → Project Settings → Environment Variables** for Production, Preview, and Development as appropriate:
+This is the recommended setup for Province, City, and Regional Office Pages. Each authorized staff member connects their Facebook account, sees the Pages they are allowed to manage, and selects the current publishing Page in **Settings → Facebook Pages**.
+
+1. Create or configure a Meta app with Facebook Login and the permissions `pages_show_list`, `pages_manage_posts`, and `pages_read_engagement`.
+2. Add this exact production redirect URI in the Meta app: `https://socialmedia-dilg12.vercel.app/api/facebook/oauth/callback`.
+3. In Vercel Marketplace, connect a Postgres provider to the project so Vercel supplies `DATABASE_URL`.
+4. Add the variables below in **Vercel → Project Settings → Environment Variables**, then redeploy.
 
 ```text
-FACEBOOK_PAGE_ID
-FACEBOOK_PAGE_ACCESS_TOKEN
-FACEBOOK_PUBLISH_KEY
+FACEBOOK_APP_ID
+FACEBOOK_APP_SECRET
+FACEBOOK_TOKEN_ENCRYPTION_KEY
+DATABASE_URL
 FACEBOOK_GRAPH_API_VERSION=v25.0
 BLOB_READ_WRITE_TOKEN
+NEXT_PUBLIC_SITE_URL=https://socialmedia-dilg12.vercel.app
 ```
 
-`FACEBOOK_PAGE_ACCESS_TOKEN` must be a Page/System User token with at least `pages_manage_posts` and `pages_read_engagement` for the target Page. `FACEBOOK_PUBLISH_KEY` is a separate strong secret that protects the publishing endpoints because this device-local app does not have user accounts. Enter that publishing key in the app under **Settings → Facebook connection**; it is retained only for the browser session.
+Generate `FACEBOOK_TOKEN_ENCRYPTION_KEY` as a long random secret and never paste it into browser settings. Page access tokens are encrypted with AES-256-GCM before they are stored. The browser receives only Page names, IDs, pictures, and an opaque HttpOnly session cookie. The app creates its two database tables automatically; [the equivalent SQL schema](./db/facebook-connections.sql) is included for administrators and audits.
+
+Meta may require App Review and Business Verification before people outside the app’s assigned roles can grant these permissions. A person can publish only to Pages their Facebook account is authorized to manage. Personal-profile posting is not supported by this Page integration.
+
+For a temporary single-Page fallback, the original `FACEBOOK_PAGE_ID`, `FACEBOOK_PAGE_ACCESS_TOKEN`, and `FACEBOOK_PUBLISH_KEY` variables are still supported. The old publishing key can be entered under **Settings → Facebook Pages → Legacy single-Page connection** and is retained only for that browser session.
 
 The secure server workflow prepares the selected template on every photo, uploads each photo as unpublished media, then creates one multi-photo Page feed post. A photo My Day/Story uses the first campaign photo in a generated 1080 × 1920 layout. Video campaigns use one MP4, MOV, or WebM file and can publish to the Page Feed, My Day, or both.
 
@@ -74,4 +87,4 @@ Public Blob storage is intentional: Meta must be able to fetch the video URL dur
 
 Workspace records are stored in the current browser under the key `dilg-social-studio:v1`. The Settings page can export and restore a JSON backup. Uploaded photos are resized and compressed before local storage; videos remain in Vercel Blob and the local campaign stores only their public URL and metadata.
 
-The app never stores or returns the Meta Page access token in browser storage. Only the server-side Next.js routes can read it from Vercel. The session publishing key is not included in local backups or exports.
+The app never stores or returns Meta Page access tokens in browser storage. OAuth Page tokens are encrypted in Postgres and decrypted only inside secured Next.js routes. The optional legacy token remains in Vercel environment variables. Neither tokens nor the optional legacy session publishing key are included in local backups or exports.

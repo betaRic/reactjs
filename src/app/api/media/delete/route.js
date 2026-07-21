@@ -1,12 +1,12 @@
 import { del } from "@vercel/blob";
-import { getFacebookConfig, requirePublishAccess, toRouteError } from "@/lib/facebook-server";
+import { resolveFacebookConfig } from "@/lib/facebook-request";
+import { toRouteError } from "@/lib/facebook-server";
 
 export const runtime = "nodejs";
 
 export async function POST(request) {
   try {
-    const config = getFacebookConfig();
-    requirePublishAccess(request, config);
+    await resolveFacebookConfig(request);
     const { url } = await request.json();
     const parsed = new URL(String(url || ""));
     if (parsed.protocol !== "https:" || !parsed.hostname.endsWith(".blob.vercel-storage.com")) {

@@ -1,12 +1,12 @@
-import { FacebookApiError, getFacebookConfig, publishVideo, publishVideoStory, requirePublishAccess, toRouteError } from "@/lib/facebook-server";
+import { resolveFacebookConfig } from "@/lib/facebook-request";
+import { FacebookApiError, publishVideo, publishVideoStory, toRouteError } from "@/lib/facebook-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(request) {
   try {
-    const config = getFacebookConfig();
-    requirePublishAccess(request, config);
+    const config = await resolveFacebookConfig(request);
     const payload = await request.json();
     const videoUrl = validateVideoUrl(payload?.videoUrl);
     const destinations = Array.isArray(payload?.destinations)

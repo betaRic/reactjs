@@ -10,9 +10,9 @@ const daysFromNow = (days, hour = 9) => {
 export const INITIAL_STATE = {
   version: 1,
   settings: {
-    organization: "DILG General Santos City",
-    pageName: "DILG General Santos City",
-    pageHandle: "@DILGGensan",
+    organization: "DILG Region XII",
+    pageName: "DILG Region XII",
+    pageHandle: "@DILGRegionXII",
     defaultTemplateId: "template-feed",
     approvalRequired: true,
     notifications: true,

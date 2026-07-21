@@ -1,4 +1,5 @@
-import { getFacebookConfig, publishPhotoStory, requirePublishAccess, toRouteError, uploadUnpublishedPhoto } from "@/lib/facebook-server";
+import { resolveFacebookConfig } from "@/lib/facebook-request";
+import { publishPhotoStory, toRouteError, uploadUnpublishedPhoto } from "@/lib/facebook-server";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -7,8 +8,7 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 export async function POST(request) {
   try {
-    const config = getFacebookConfig();
-    requirePublishAccess(request, config);
+    const config = await resolveFacebookConfig(request);
     const form = await request.formData();
     const photo = form.get("photo");
     if (!(photo instanceof File)) return Response.json({ ok: false, error: "A Story image is required." }, { status: 400 });

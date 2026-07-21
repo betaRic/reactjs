@@ -5,7 +5,7 @@ const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://socialmedia-dilg12.
 export const metadata = {
   metadataBase: new URL(siteUrl),
   title: "DILG Social Studio",
-  description: "A modern campaign planning and publishing workspace for DILG General Santos City.",
+  description: "A modern campaign planning and Facebook publishing workspace for DILG offices across Region XII.",
   openGraph: {
     title: "DILG Social Studio",
     description: "Plan, review, and publish community updates from one calm workspace.",
