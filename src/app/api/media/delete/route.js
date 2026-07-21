@@ -6,11 +6,14 @@ export const runtime = "nodejs";
 
 export async function POST(request) {
   try {
-    await resolveFacebookConfig(request);
+    const config = await resolveFacebookConfig(request);
     const { url } = await request.json();
     const parsed = new URL(String(url || ""));
     if (parsed.protocol !== "https:" || !parsed.hostname.endsWith(".blob.vercel-storage.com")) {
       return Response.json({ ok: false, error: "That is not an approved video storage URL." }, { status: 400 });
+    }
+    if (!parsed.pathname.startsWith(`/campaign-videos/${config.pageId}/`)) {
+      return Response.json({ ok: false, error: "That video does not belong to the selected Facebook Page." }, { status: 403 });
     }
     await del(parsed.href);
     return Response.json({ ok: true });

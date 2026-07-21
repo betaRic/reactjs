@@ -14,13 +14,13 @@ export async function POST(request) {
       request,
       onBeforeGenerateToken: async (pathname, clientPayload) => {
         const payload = safeJson(clientPayload);
-        await authorizeMediaUpload(request, payload.publishKey);
-        if (!pathname.startsWith("campaign-videos/")) throw new Error("Invalid video upload path.");
+        const config = await authorizeMediaUpload(request, payload.pageId);
+        if (!pathname.startsWith(`campaign-videos/${config.pageId}/`)) throw new Error("Invalid video upload path.");
         return {
           allowedContentTypes: ["video/mp4", "video/quicktime", "video/webm"],
           maximumSizeInBytes: MAX_VIDEO_BYTES,
           addRandomSuffix: true,
-          tokenPayload: JSON.stringify({ kind: "campaign-video" }),
+          tokenPayload: JSON.stringify({ kind: "campaign-video", pageId: config.pageId }),
         };
       },
       onUploadCompleted: async () => {},

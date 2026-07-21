@@ -8,7 +8,7 @@ A separate Next.js rebuild of the NAS5 Facebook Poster workflow for DILG offices
 - Node.js runtime for Next.js and the health endpoint
 - Tailwind CSS 4 plus a custom responsive design system
 - Motion for page and composer transitions
-- Browser local storage for campaigns, photos, templates, settings, and activity
+- Browser local storage partitioned by signed-in account and Facebook Page
 - Vercel Blob direct uploads for campaign videos
 - Secure Meta OAuth with selectable Facebook Pages
 - Encrypted Page-token storage in Vercel Marketplace Postgres
@@ -61,7 +61,7 @@ Generate `FACEBOOK_TOKEN_ENCRYPTION_KEY` as a long random secret and never paste
 
 Meta may require App Review and Business Verification before people outside the app’s assigned roles can grant these permissions. A person can publish only to Pages their Facebook account is authorized to manage. Personal-profile posting is not supported by this Page integration.
 
-For a temporary single-Page fallback, the original `FACEBOOK_PAGE_ID`, `FACEBOOK_PAGE_ACCESS_TOKEN`, and `FACEBOOK_PUBLISH_KEY` variables are still supported. The old publishing key can be entered under **Settings → Facebook Pages → Legacy single-Page connection** and is retained only for that browser session.
+Facebook sign-in is the application account system. Each browser receives an opaque HttpOnly account session. The active Page is kept per browser tab and is included in every media, Feed, video, Story, and connection-test request. The server verifies that the requested Page belongs to that session before using its encrypted token, so another user or tab cannot redirect a post by changing a shared server setting. The legacy single-Page token and publishing-key path has been removed.
 
 The secure server workflow prepares the selected template on every photo, uploads each photo as unpublished media, then creates one multi-photo Page feed post. A photo My Day/Story uses the first campaign photo in a generated 1080 × 1920 layout. Video campaigns use one MP4, MOV, or WebM file and can publish to the Page Feed, My Day, or both.
 
@@ -69,7 +69,7 @@ The secure server workflow prepares the selected template on every photo, upload
 
 Every uploaded photo has non-destructive editing controls for zoom, horizontal and vertical crop position, 90-degree rotation, and reset. The photo editor and Facebook preview render the actual final composition in real time while keeping the selected brand template unchanged.
 
-Photo campaigns can also enable a shared event-information banner. The event title, date, and location are applied consistently to every campaign photo and can be placed at the top or bottom, aligned left, center, or right. When the event title is blank, the campaign title is used automatically.
+Photo campaigns can also enable a shared event-information banner. The event title, date, and location are applied consistently to every campaign photo. Use **Position directly on image** to drag the complete banner anywhere inside the composed template; arrow keys provide precise nudging. The selected coordinates apply to every photo without modifying the photo or template. When the event title is blank, the campaign title is used automatically.
 
 ### Enable video uploads
 
@@ -87,6 +87,6 @@ Public Blob storage is intentional: Meta must be able to fetch the video URL dur
 
 ## Data model and security
 
-Workspace records are stored in the current browser under the key `dilg-social-studio:v1`. The Settings page can export and restore a JSON backup. Uploaded photos are resized and compressed before local storage; videos remain in Vercel Blob and the local campaign stores only their public URL and metadata.
+Workspace records remain device-local but are partitioned under `dilg-social-studio:v1:{account}:{page}`. Switching accounts or Pages loads a separate campaign, template, settings, and activity workspace, preventing one office from seeing or overwriting another office’s local drafts on a shared device. The Settings page can export and restore the current Page workspace. Uploaded photos are resized and compressed before local storage; videos remain in Vercel Blob and the local campaign stores only their public URL and metadata.
 
-The app never stores or returns Meta Page access tokens in browser storage. OAuth Page tokens are encrypted in Postgres and decrypted only inside secured Next.js routes. The optional legacy token remains in Vercel environment variables. Neither tokens nor the optional legacy session publishing key are included in local backups or exports.
+The app never stores or returns Meta Page access tokens in browser storage. Page tokens are encrypted in Postgres and decrypted only inside authenticated Next.js routes. Tokens and account session identifiers are not included in local backups or exports.

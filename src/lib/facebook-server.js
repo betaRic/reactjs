@@ -1,8 +1,5 @@
 import "server-only";
 
-import { timingSafeEqual } from "node:crypto";
-
-const DEFAULT_GRAPH_VERSION = "v25.0";
 const GRAPH_ORIGIN = "https://graph.facebook.com";
 const MAX_ATTEMPTS = 3;
 
@@ -12,34 +9,6 @@ export class FacebookApiError extends Error {
     this.name = "FacebookApiError";
     this.status = status;
     this.details = details;
-  }
-}
-
-export function getFacebookConfig({ allowMissing = false } = {}) {
-  const config = {
-    pageId: clean(process.env.FACEBOOK_PAGE_ID),
-    accessToken: clean(process.env.FACEBOOK_PAGE_ACCESS_TOKEN),
-    publishKey: clean(process.env.FACEBOOK_PUBLISH_KEY),
-    graphVersion: clean(process.env.FACEBOOK_GRAPH_API_VERSION) || DEFAULT_GRAPH_VERSION,
-  };
-  const missing = [];
-  if (!config.pageId) missing.push("FACEBOOK_PAGE_ID");
-  if (!config.accessToken) missing.push("FACEBOOK_PAGE_ACCESS_TOKEN");
-  if (!config.publishKey) missing.push("FACEBOOK_PUBLISH_KEY");
-  if (missing.length && !allowMissing) {
-    throw new FacebookApiError("Facebook publishing is not configured on this deployment.", 503, { missing });
-  }
-  return { ...config, configured: missing.length === 0, missing };
-}
-
-export function requirePublishAccess(request, config) {
-  const supplied = clean(request.headers.get("x-publish-key"));
-  verifyPublishKeyValue(supplied, config);
-}
-
-export function verifyPublishKeyValue(supplied, config = getFacebookConfig()) {
-  if (!clean(supplied) || !safeEqual(clean(supplied), config.publishKey)) {
-    throw new FacebookApiError("The publishing key is missing or incorrect.", 401);
   }
 }
 
@@ -222,12 +191,6 @@ async function graphRequest(config, path, { method = "GET", body, search = {}, l
     await new Promise((resolve) => setTimeout(resolve, 450 * 2 ** (attempt - 1)));
   }
   throw lastError || new FacebookApiError(`${label} failed.`, 502);
-}
-
-function safeEqual(left, right) {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
-  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function clean(value) {

@@ -76,10 +76,10 @@ const navigation = [
 ];
 
 const campaignFilters = ["All", "Draft", "Ready for review", "Scheduled", "Published"];
-const PUBLISH_KEY_STORAGE = "dilg-social-studio:publish-key";
-const EMPTY_FACEBOOK_DIRECTORY = { loading: true, available: false, connected: false, missing: [], pages: [], selectedPageId: "", user: null };
+const PAGE_SELECTION_STORAGE = "dilg-social-studio:selected-page";
+const EMPTY_FACEBOOK_DIRECTORY = { loading: true, available: false, connected: false, missing: [], pages: [], selectedPageId: "", accountKey: "", user: null };
 const DEFAULT_PHOTO_EDIT = { zoom: 1, positionX: 50, positionY: 50, rotation: 0 };
-const DEFAULT_EVENT_OVERLAY = { enabled: false, title: "", date: "", location: "", position: "bottom-left" };
+const DEFAULT_EVENT_OVERLAY = { enabled: false, title: "", date: "", location: "", position: "bottom-left", positionX: 0, positionY: 100 };
 const browserImageCache = new Map();
 const rotatedImageCache = new WeakMap();
 
@@ -101,25 +101,22 @@ export default function StudioApp() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [draft, setDraft] = useState(emptyDraft());
-  const [publishKey, setPublishKey] = useState("");
   const [facebookDirectory, setFacebookDirectory] = useState(EMPTY_FACEBOOK_DIRECTORY);
   const [publishing, setPublishing] = useState(false);
   const [publishProgress, setPublishProgress] = useState("");
+  const studioScopeRef = useRef("");
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      setStudio(loadStudioState());
-      setPublishKey(window.sessionStorage.getItem(PUBLISH_KEY_STORAGE) || "");
       requestJson("/api/facebook/connections")
-        .then((directory) => setFacebookDirectory({ ...directory, loading: false }))
+        .then((directory) => setFacebookDirectory(normalizeFacebookDirectory(directory)))
         .catch((error) => setFacebookDirectory({ ...EMPTY_FACEBOOK_DIRECTORY, loading: false, error: error.message }));
 
       const url = new URL(window.location.href);
       const facebookResult = url.searchParams.get("facebook");
       if (facebookResult) {
-        setActiveView("settings");
-        if (facebookResult === "connected") toast.success("Facebook connected. Choose the Page this workspace should publish to.");
-        else toast.error("Facebook could not be connected. Please try again or ask an administrator to check the Meta app settings.", { duration: 8000 });
+        if (facebookResult === "connected") toast.success("Account signed in. Choose the Facebook Page you want to manage.");
+        else toast.error("Facebook sign-in could not be completed. Please try again or ask the regional administrator to check the Meta app settings.", { duration: 8000 });
         url.searchParams.delete("facebook");
         window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
       }
@@ -128,9 +125,22 @@ export default function StudioApp() {
   }, []);
 
   useEffect(() => {
-    if (!studio) return;
+    if (facebookDirectory.loading || !facebookDirectory.connected || !facebookDirectory.selectedPageId) {
+      studioScopeRef.current = "";
+      setStudio(null);
+      return;
+    }
+    const nextScope = `${facebookDirectory.accountKey || "account"}:${facebookDirectory.selectedPageId}`;
+    if (studioScopeRef.current === nextScope) return;
+    studioScopeRef.current = nextScope;
+    setComposerOpen(false);
+    setStudio(structuredClone(loadStudioState(nextScope)));
+  }, [facebookDirectory.loading, facebookDirectory.connected, facebookDirectory.accountKey, facebookDirectory.selectedPageId]);
+
+  useEffect(() => {
+    if (!studio || !studioScopeRef.current) return;
     try {
-      saveStudioState(studio);
+      saveStudioState(studio, studioScopeRef.current);
     } catch {
       toast.error("This browser is out of local storage space. Remove a few large images and try again.");
     }
@@ -151,17 +161,11 @@ export default function StudioApp() {
     setComposerOpen(true);
   }
 
-  function updatePublishKey(value) {
-    setPublishKey(value);
-    if (value) window.sessionStorage.setItem(PUBLISH_KEY_STORAGE, value);
-    else window.sessionStorage.removeItem(PUBLISH_KEY_STORAGE);
-  }
-
   async function refreshFacebookDirectory() {
     setFacebookDirectory((current) => ({ ...current, loading: true, error: "" }));
     try {
       const directory = await requestJson("/api/facebook/connections");
-      setFacebookDirectory({ ...directory, loading: false });
+      setFacebookDirectory((current) => normalizeFacebookDirectory(directory, current.selectedPageId));
       return directory;
     } catch (error) {
       setFacebookDirectory((current) => ({ ...current, loading: false, error: error.message }));
@@ -251,7 +255,7 @@ export default function StudioApp() {
         setPublishProgress("Sending video to Facebook");
         const result = await requestJson("/api/facebook/video", {
           method: "POST",
-          headers: { "Content-Type": "application/json", "x-publish-key": publishKey },
+          headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedFacebookPage?.id || "" },
           body: JSON.stringify({
             title: draft.title,
             message: draft.caption,
@@ -276,7 +280,7 @@ export default function StudioApp() {
               setPublishProgress(`Uploading Feed photo ${index + 1} of ${draft.images.length}`);
               const uploaded = await requestJson("/api/facebook/media", {
                 method: "POST",
-                headers: { "x-publish-key": publishKey },
+                headers: { "x-facebook-page-id": selectedFacebookPage?.id || "" },
                 body: form,
               });
               mediaIds.push(uploaded.mediaId);
@@ -284,7 +288,7 @@ export default function StudioApp() {
             setPublishProgress(draft.scheduledFor ? "Scheduling Facebook Feed post" : "Publishing Facebook Feed post");
             results.feed = await requestJson("/api/facebook/publish", {
               method: "POST",
-              headers: { "Content-Type": "application/json", "x-publish-key": publishKey },
+              headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedFacebookPage?.id || "" },
               body: JSON.stringify({
                 message: draft.caption,
                 mediaIds,
@@ -304,7 +308,7 @@ export default function StudioApp() {
             setPublishProgress("Publishing Facebook My Day");
             results.story = await requestJson("/api/facebook/story/photo", {
               method: "POST",
-              headers: { "x-publish-key": publishKey },
+              headers: { "x-facebook-page-id": selectedFacebookPage?.id || "" },
               body: form,
             });
           } catch (error) {
@@ -366,6 +370,9 @@ export default function StudioApp() {
     toast.success("Campaign removed.");
   }
 
+  if (facebookDirectory.loading) return <LoadingScreen />;
+  if (!facebookDirectory.available) return <AccountSetupScreen facebookDirectory={facebookDirectory} refreshFacebookDirectory={refreshFacebookDirectory} />;
+  if (!facebookDirectory.connected) return <AccountSignInScreen />;
   if (!studio) return <LoadingScreen />;
 
   const selectedFacebookPage = facebookDirectory.pages.find((page) => page.id === facebookDirectory.selectedPageId) || facebookDirectory.pages[0] || null;
@@ -378,8 +385,6 @@ export default function StudioApp() {
     setActiveView,
     updateCampaignStatus,
     deleteCampaign,
-    publishKey,
-    setPublishKey: updatePublishKey,
     facebookDirectory,
     setFacebookDirectory,
     refreshFacebookDirectory,
@@ -392,6 +397,7 @@ export default function StudioApp() {
         activeView={activeView}
         setActiveView={setActiveView}
         organization={activeOrganization}
+        account={facebookDirectory.user}
         openComposer={() => openComposer()}
         mobileMenuOpen={mobileMenuOpen}
         setMobileMenuOpen={setMobileMenuOpen}
@@ -430,7 +436,6 @@ export default function StudioApp() {
             setDraft={setDraft}
             templates={studio.templates}
             settings={studio.settings}
-            publishKey={publishKey}
             facebookPage={selectedFacebookPage}
             publishing={publishing}
             publishProgress={publishProgress}
@@ -445,11 +450,13 @@ export default function StudioApp() {
   );
 }
 
-function Sidebar({ activeView, setActiveView, organization, openComposer, mobileMenuOpen, setMobileMenuOpen }) {
+function Sidebar({ activeView, setActiveView, organization, account, openComposer, mobileMenuOpen, setMobileMenuOpen }) {
   const choose = (id) => {
     setActiveView(id);
     setMobileMenuOpen(false);
   };
+  const accountName = account?.name || "DILG staff";
+  const accountInitials = accountName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "DS";
   return (
     <>
       <aside className={clsx("sidebar", mobileMenuOpen && "is-open")}>
@@ -476,8 +483,8 @@ function Sidebar({ activeView, setActiveView, organization, openComposer, mobile
             <div><strong>Private by default</strong><span>Saved only on this device</span></div>
           </div>
           <div className="profile-row">
-            <div className="profile-avatar">DG</div>
-            <div><strong>{organization}</strong><span>Content team</span></div>
+            <div className="profile-avatar">{accountInitials}</div>
+            <div><strong>{accountName}</strong><span>{organization}</span></div>
             <MoreHorizontal size={18} />
           </div>
         </div>
@@ -738,7 +745,7 @@ function ActivityView({ studio }) {
   );
 }
 
-function SettingsView({ studio, setStudio, publishKey, setPublishKey, facebookDirectory, setFacebookDirectory, refreshFacebookDirectory }) {
+function SettingsView({ studio, setStudio, facebookDirectory, setFacebookDirectory, refreshFacebookDirectory }) {
   const importRef = useRef(null);
   const [settings, setSettings] = useState(studio.settings);
   function save() {
@@ -789,7 +796,7 @@ function SettingsView({ studio, setStudio, publishKey, setPublishKey, facebookDi
           <Field label="Default template"><select value={settings.defaultTemplateId} onChange={(event) => setSettings({ ...settings, defaultTemplateId: event.target.value })}>{studio.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></Field>
         </div>
       </section>
-      <FacebookConnection publishKey={publishKey} setPublishKey={setPublishKey} facebookDirectory={facebookDirectory} setFacebookDirectory={setFacebookDirectory} refreshFacebookDirectory={refreshFacebookDirectory} />
+      <FacebookConnection facebookDirectory={facebookDirectory} setFacebookDirectory={setFacebookDirectory} refreshFacebookDirectory={refreshFacebookDirectory} />
       <section className="settings-section panel">
         <div className="settings-title"><div className="settings-glyph amber"><ShieldCheck size={20} /></div><div><h3>Publishing workflow</h3><p>Control the checks content passes before publishing.</p></div></div>
         <ToggleRow title="Require approval" text="Campaigns must be marked approved before publishing." checked={settings.approvalRequired} onChange={(value) => setSettings({ ...settings, approvalRequired: value })} />
@@ -798,44 +805,35 @@ function SettingsView({ studio, setStudio, publishKey, setPublishKey, facebookDi
       <section className="settings-section panel">
         <div className="settings-title"><div className="settings-glyph emerald"><Download size={20} /></div><div><h3>Local data</h3><p>Everything is stored in this browser. Keep a backup when moving devices.</p></div></div>
         <div className="data-actions"><button className="secondary-button" onClick={exportData}><Download size={17} /> Export backup</button><button className="secondary-button" onClick={() => importRef.current?.click()}><Upload size={17} /> Import backup</button><button className="danger-button" onClick={reset}><Trash2 size={17} /> Reset workspace</button><input ref={importRef} type="file" accept="application/json" hidden onChange={importData} /></div>
-        <div className="security-note"><ShieldCheck size={18} /><span><strong>Facebook Page tokens stay on the server.</strong> Connected tokens are encrypted before database storage and are never sent to the browser or included in local backups. Legacy environment tokens also remain server-only.</span></div>
+        <div className="security-note"><ShieldCheck size={18} /><span><strong>Facebook Page tokens stay on the server.</strong> Connected tokens are encrypted before database storage and are never sent to the browser or included in local backups. Every publishing request also names the selected Page and verifies that it belongs to the signed-in account.</span></div>
       </section>
       <div className="settings-save"><button className="primary-button" onClick={save}><Check size={17} /> Save settings</button></div>
     </div>
   );
 }
 
-function FacebookConnection({ publishKey, setPublishKey, facebookDirectory, setFacebookDirectory, refreshFacebookDirectory }) {
+function FacebookConnection({ facebookDirectory, setFacebookDirectory, refreshFacebookDirectory }) {
   const [checking, setChecking] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [connection, setConnection] = useState(null);
   const selectedPage = facebookDirectory.pages.find((page) => page.id === facebookDirectory.selectedPageId) || facebookDirectory.pages[0] || null;
 
-  async function choosePage(pageId) {
+  function choosePage(pageId) {
     if (!pageId || pageId === facebookDirectory.selectedPageId) return;
-    setSwitching(true);
-    try {
-      const directory = await requestJson("/api/facebook/connections", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pageId }),
-      });
-      setFacebookDirectory({ ...directory, loading: false });
-      setConnection(null);
-      toast.success(`Publishing Page changed to ${directory.pages.find((page) => page.id === pageId)?.name || "the selected Page"}.`);
-    } catch (error) {
-      toast.error(error.message, { duration: 7000 });
-    } finally { setSwitching(false); }
+    window.sessionStorage.setItem(`${PAGE_SELECTION_STORAGE}:${facebookDirectory.accountKey}`, pageId);
+    setFacebookDirectory((current) => ({ ...current, selectedPageId: pageId }));
+    setConnection(null);
+    toast.success(`Workspace changed to ${facebookDirectory.pages.find((page) => page.id === pageId)?.name || "the selected Page"}.`);
   }
 
   async function disconnect() {
-    if (!window.confirm("Disconnect this Facebook account from this browser? Stored Page connections for this session will be removed.")) return;
+    if (!window.confirm("Sign out of this account on this browser? Page access for this session will be removed.")) return;
     setSwitching(true);
     try {
       await requestJson("/api/facebook/connections", { method: "DELETE" });
       setFacebookDirectory({ ...EMPTY_FACEBOOK_DIRECTORY, loading: false, available: facebookDirectory.available, missing: facebookDirectory.missing });
       setConnection(null);
-      toast.success("Facebook disconnected from this browser.");
+      toast.success("Account signed out.");
     } catch (error) {
       toast.error(error.message, { duration: 7000 });
     } finally { setSwitching(false); }
@@ -844,7 +842,7 @@ function FacebookConnection({ publishKey, setPublishKey, facebookDirectory, setF
   async function checkConnection() {
     setChecking(true);
     try {
-      const result = await requestJson("/api/facebook/status", { headers: { "x-publish-key": publishKey } });
+      const result = await requestJson("/api/facebook/status", { headers: { "x-facebook-page-id": selectedPage?.id || "" } });
       setConnection(result);
       if (!result.configured) toast.error(result.connectionRequired ? "Connect a Facebook Page before testing." : `Vercel is missing: ${result.missing.join(", ")}`);
       else if (!result.videoStorageConfigured) toast.warning(`Connected to ${result.page.name}. Add a public Vercel Blob store to enable video uploads.`);
@@ -856,14 +854,14 @@ function FacebookConnection({ publishKey, setPublishKey, facebookDirectory, setF
   }
   return (
     <section className="settings-section panel facebook-connection-card">
-      <div className="settings-title"><div className="settings-glyph sky"><Wifi size={20} /></div><div><h3>Facebook Pages</h3><p>Connect once, then choose any Province or Regional Office Page you manage.</p></div>{facebookDirectory.connected && <span className="connection-badge connected"><CheckCircle2 size={15} /> Connected</span>}</div>
+      <div className="settings-title"><div className="settings-glyph sky"><Wifi size={20} /></div><div><h3>Account and Facebook Pages</h3><p>Your account and Page workspace are isolated from every other signed-in user.</p></div>{facebookDirectory.connected && <span className="connection-badge connected"><CheckCircle2 size={15} /> Signed in</span>}</div>
 
       {facebookDirectory.loading ? (
         <div className="connection-loading"><Loader2 className="spin" size={19} /> Loading Facebook connection…</div>
       ) : facebookDirectory.available ? (
         facebookDirectory.connected ? (
           <div className="oauth-connected-layout">
-            <div className="connected-user"><BadgeCheck size={18} /><span>Connected as <strong>{facebookDirectory.user?.name || "Facebook user"}</strong></span></div>
+            <div className="connected-user"><BadgeCheck size={18} /><span>Signed in as <strong>{facebookDirectory.user?.name || "Facebook user"}</strong></span></div>
             <div className="page-switcher">
               <Field label="Publishing Page" hint={`${facebookDirectory.pages.length} available`}>
                 <select value={selectedPage?.id || ""} onChange={(event) => choosePage(event.target.value)} disabled={switching}>
@@ -872,11 +870,11 @@ function FacebookConnection({ publishKey, setPublishKey, facebookDirectory, setF
               </Field>
               {switching && <Loader2 className="spin page-switcher-loader" size={18} />}
             </div>
-            {selectedPage && <div className="connected-page"><div className="connected-page-avatar">{selectedPage.picture ? <img src={selectedPage.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>{selectedPage.name}</strong><span>Page ID {selectedPage.id} · selected for Feed and My Day publishing</span></div></div>}
+            {selectedPage && <div className="connected-page"><div className="connected-page-avatar">{selectedPage.picture ? <img src={selectedPage.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>{selectedPage.name}</strong><span>Page ID {selectedPage.id} · isolated workspace for Feed and My Day publishing</span></div></div>}
             <div className="connection-actions">
               <button className="secondary-button" onClick={checkConnection} disabled={checking || switching}>{checking ? <Loader2 className="spin" size={17} /> : <Wifi size={17} />} Test selected Page</button>
               <a className="secondary-button" href="/api/facebook/oauth/start"><RefreshCcw size={17} /> Refresh Pages</a>
-              <button className="danger-button" onClick={disconnect} disabled={switching}><Trash2 size={17} /> Disconnect</button>
+              <button className="danger-button" onClick={disconnect} disabled={switching}><Trash2 size={17} /> Sign out</button>
             </div>
           </div>
         ) : (
@@ -889,16 +887,7 @@ function FacebookConnection({ publishKey, setPublishKey, facebookDirectory, setF
         <FacebookAdminSetup missing={facebookDirectory.missing} onRefresh={refreshFacebookDirectory} />
       )}
 
-      <details className="legacy-connection">
-        <summary>Temporary single-Page fallback — not for the regional rollout</summary>
-        <div className="connection-layout">
-          <Field label="Session publishing key" hint="Optional fallback"><div className="secure-input"><KeyRound size={17} /><input type="password" autoComplete="off" value={publishKey} onChange={(event) => setPublishKey(event.target.value)} placeholder="Enter the key configured in Vercel" /></div></Field>
-          <button className="secondary-button connection-check" onClick={checkConnection} disabled={checking || (!publishKey && !facebookDirectory.connected)}>{checking ? <Loader2 className="spin" size={17} /> : <Wifi size={17} />} Test connection</button>
-        </div>
-        <p className="session-key-note">Use this only while the old single-Page environment-token setup is active. The key stays in session storage and clears when the browser session ends.</p>
-      </details>
-
-      {connection?.connected && <div className="connected-page test-result"><div className="connected-page-avatar">{connection.page.picture ? <img src={connection.page.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>Connection test passed: {connection.page.name}</strong><span>Page ID {connection.page.id} · Graph API {connection.graphVersion} · {connection.mode === "oauth" ? "secure account connection" : "legacy environment token"}</span></div>{connection.page.link && <a href={connection.page.link} target="_blank" rel="noreferrer">Open Page <ExternalLink size={14} /></a>}</div>}
+      {connection?.connected && <div className="connected-page test-result"><div className="connected-page-avatar">{connection.page.picture ? <img src={connection.page.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>Connection test passed: {connection.page.name}</strong><span>Page ID {connection.page.id} · Graph API {connection.graphVersion} · secure account connection</span></div>{connection.page.link && <a href={connection.page.link} target="_blank" rel="noreferrer">Open Page <ExternalLink size={14} /></a>}</div>}
       {connection?.connected && <div className={clsx("video-storage-status", connection.videoStorageConfigured ? "ready" : "missing")}><CloudUpload size={17} /><div><strong>{connection.videoStorageConfigured ? "Video storage ready" : "Video storage not connected"}</strong><span>{connection.videoStorageConfigured ? "Vercel Blob can accept campaign videos." : "Create a public Vercel Blob store to enable video uploads."}</span></div></div>}
       {connection && !connection.connected && <div className="connection-error">{connection.configured === false ? `Server variables still needed: ${connection.missing.join(", ")}` : connection.error}</div>}
       {facebookDirectory.error && <div className="connection-error">{facebookDirectory.error} <button type="button" onClick={() => refreshFacebookDirectory().catch(() => {})}>Try again</button></div>}
@@ -974,15 +963,17 @@ function FacebookAdminSetup({ missing = [], onRefresh }) {
   );
 }
 
-function Composer({ draft, setDraft, templates, settings, publishKey, facebookPage, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
+function Composer({ draft, setDraft, templates, settings, facebookPage, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
   const fileRef = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [draggedImageId, setDraggedImageId] = useState(null);
   const [editingImageId, setEditingImageId] = useState(null);
+  const [editingOverlay, setEditingOverlay] = useState(false);
   const activeTemplate = templates.find((item) => item.id === draft.templateId) || templates[0];
   const hasVideo = draft.images.some((item) => item.type === "video");
   const editingImage = draft.images.find((item) => item.id === editingImageId && item.type !== "video");
+  const overlayPreviewImage = draft.images.find((item) => item.type !== "video");
   const publishingIdentity = facebookPage?.name || settings.organization || "DILG Region XII";
   const organizationHashtag = `#${publishingIdentity.replace(/[^A-Za-z0-9]/g, "") || "DILGRegionXII"}`;
   const defaultLocation = publishingIdentity.replace(/^DILG\s*/i, "").trim() || "Region XII";
@@ -998,10 +989,10 @@ function Composer({ draft, setDraft, templates, settings, publishKey, facebookPa
       setUploadProgress(0);
       try {
         const metadata = await readVideoMetadata(file);
-        const blob = await upload(`campaign-videos/${Date.now()}-${sanitizeFileName(file.name)}`, file, {
+        const blob = await upload(`campaign-videos/${facebookPage?.id || "unselected"}/${Date.now()}-${sanitizeFileName(file.name)}`, file, {
           access: "public",
           handleUploadUrl: "/api/media/upload",
-          clientPayload: JSON.stringify({ publishKey }),
+          clientPayload: JSON.stringify({ pageId: facebookPage?.id || "" }),
           multipart: file.size > 100 * 1024 * 1024,
           onUploadProgress: ({ percentage }) => setUploadProgress(Math.round(percentage)),
         });
@@ -1135,7 +1126,7 @@ function Composer({ draft, setDraft, templates, settings, publishKey, facebookPa
                     <Field label="Event title" hint="Uses campaign title if blank"><input value={draft.eventOverlay.title} maxLength={120} onChange={(event) => updateEventOverlay({ title: event.target.value })} placeholder={draft.title || "Event title"} /></Field>
                     <Field label="Event date"><input type="date" value={draft.eventOverlay.date} onChange={(event) => updateEventOverlay({ date: event.target.value })} /></Field>
                     <Field label="Location"><input value={draft.eventOverlay.location} maxLength={80} onChange={(event) => updateEventOverlay({ location: event.target.value })} placeholder={`e.g. ${defaultLocation}`} /></Field>
-                    <Field label="Banner placement"><select value={normalizeEventOverlay(draft.eventOverlay).position} onChange={(event) => updateEventOverlay({ position: event.target.value })}><option value="top-left">Top left</option><option value="top-center">Top center</option><option value="top-right">Top right</option><option value="bottom-left">Bottom left</option><option value="bottom-center">Bottom center</option><option value="bottom-right">Bottom right</option></select></Field>
+                    <div className="overlay-direct-control"><span>Banner position</span><button type="button" className="secondary-button" disabled={!overlayPreviewImage} onClick={() => setEditingOverlay(true)}><Move size={17} /> Position directly on image</button><small>{overlayPreviewImage ? "Drag the complete event banner anywhere inside the composed template." : "Add a photo before positioning the banner."}</small></div>
                   </motion.div>
                 )}
               </div>
@@ -1144,7 +1135,7 @@ function Composer({ draft, setDraft, templates, settings, publishKey, facebookPa
               <div className="step-heading"><span>4</span><div><h3>Choose where to publish</h3><p>Send this campaign to the Facebook Feed, My Day, or both.</p></div></div>
               <div className={clsx("publishing-page-context", facebookPage && "is-connected")}>
                 <div className="connected-page-avatar">{facebookPage?.picture ? <img src={facebookPage.picture} alt="" /> : <MessageSquareText size={18} />}</div>
-                <div><strong>{facebookPage ? `Publishing as ${facebookPage.name}` : "No multi-Page destination selected"}</strong><span>{facebookPage ? "This Page will receive every selected destination below." : "Connect or select a Facebook Page in Settings. The legacy single-Page connection remains available as a fallback."}</span></div>
+                <div><strong>{facebookPage ? `Publishing as ${facebookPage.name}` : "No Facebook Page selected"}</strong><span>{facebookPage ? "This Page is carried with every publish request, so another user or browser tab cannot redirect the post." : "Choose an authorized Facebook Page before composing this campaign."}</span></div>
               </div>
               <div className="destination-grid">
                 <button type="button" className={clsx("destination-card", draft.destinations?.includes("feed") && "selected")} aria-pressed={draft.destinations?.includes("feed")} onClick={() => toggleDestination("feed")}><span><Newspaper size={20} /></span><div><strong>Facebook Feed</strong><small>Permanent Page post</small></div><i>{draft.destinations?.includes("feed") && <Check size={14} />}</i></button>
@@ -1165,6 +1156,7 @@ function Composer({ draft, setDraft, templates, settings, publishKey, facebookPa
       </motion.section>
       <AnimatePresence>
         {editingImage && <PhotoEditor media={editingImage} template={activeTemplate} eventOverlay={draft.eventOverlay} campaignTitle={draft.title} onChange={(edit) => updatePhotoEdit(editingImage.id, edit)} onClose={() => setEditingImageId(null)} />}
+        {editingOverlay && overlayPreviewImage && <EventOverlayEditor media={overlayPreviewImage} template={activeTemplate} eventOverlay={draft.eventOverlay} campaignTitle={draft.title} onChange={updateEventOverlay} onClose={() => setEditingOverlay(false)} />}
       </AnimatePresence>
     </motion.div>
   );
@@ -1202,6 +1194,112 @@ function PhotoEditor({ media, template, eventOverlay, campaignTitle, onChange, o
       </motion.section>
     </motion.div>
   );
+}
+
+function EventOverlayEditor({ media, template, eventOverlay, campaignTitle, onChange, onClose }) {
+  const overlay = normalizeEventOverlay(eventOverlay);
+  return (
+    <motion.div className="photo-editor-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <motion.section className="photo-editor overlay-position-editor" role="dialog" aria-modal="true" aria-label="Position event information banner" initial={{ opacity: 0, y: 18, scale: .97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: .98 }}>
+        <header><div><span className="section-kicker"><Move size={14} /> Direct overlay editor</span><h3>Place the event banner</h3><p>Drag the title, date, and location together on the composed image. This position will be used on every photo while the template remains unchanged.</p></div><button className="icon-button" onClick={onClose} aria-label="Close overlay editor"><X size={19} /></button></header>
+        <div className="photo-editor-body">
+          <div className="photo-editor-stage overlay-editor-stage">
+            <div className="photo-editor-canvas-wrap overlay-canvas-wrap">
+              <InteractiveOverlayCanvas media={media} template={template} eventOverlay={overlay} campaignTitle={campaignTitle || "Event title"} onChange={onChange} />
+              <div className="drag-cue overlay-drag-cue" aria-hidden="true"><Move size={18} /><span>Drag event banner</span></div>
+            </div>
+            <div className="direct-edit-help"><span><Move size={15} /> Drag the banner itself</span><span>⌨ Arrow keys nudge · Shift moves farther</span><span>The photo and template stay locked</span></div>
+          </div>
+        </div>
+        <footer><button className="secondary-button" onClick={() => onChange({ position: "bottom-left", positionX: 0, positionY: 100 })}><RefreshCcw size={17} /> Reset position</button><button className="primary-button" onClick={onClose}><Check size={17} /> Use this position</button></footer>
+      </motion.section>
+    </motion.div>
+  );
+}
+
+function InteractiveOverlayCanvas({ media, template, eventOverlay, campaignTitle, onChange }) {
+  const canvasRef = useRef(null);
+  const assetsRef = useRef(null);
+  const dragRef = useRef(null);
+  const overlayRef = useRef(normalizeEventOverlay(eventOverlay));
+  const [assets, setAssets] = useState(null);
+  const [dragging, setDragging] = useState(false);
+  const edit = useMemo(() => normalizePhotoEdit(media.edit), [media.edit]);
+  const overlay = useMemo(() => normalizeEventOverlay(eventOverlay), [eventOverlay]);
+
+  useEffect(() => { overlayRef.current = overlay; }, [overlay]);
+  useEffect(() => {
+    let active = true;
+    Promise.all([loadBrowserImage(media.src), template?.image ? loadBrowserImage(template.image) : null]).then(([source, templateImage]) => {
+      if (!active) return;
+      const nextAssets = { source, templateImage };
+      assetsRef.current = nextAssets;
+      setAssets(nextAssets);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [media.src, template?.image]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !assets) return;
+    const width = assets.templateImage?.naturalWidth || assets.source.naturalWidth;
+    const height = assets.templateImage?.naturalHeight || assets.source.naturalHeight;
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    const context = canvas.getContext("2d");
+    paintPhotoComposition(context, assets.source, assets.templateImage, width, height, edit, overlay, campaignTitle);
+    const geometry = getEventOverlayGeometry(context, width, height, overlay, campaignTitle);
+    if (geometry) {
+      context.save();
+      context.strokeStyle = "rgba(255,255,255,.96)";
+      context.lineWidth = Math.max(2, width * .003);
+      context.setLineDash([Math.max(8, width * .012), Math.max(5, width * .007)]);
+      context.strokeRect(geometry.boxX - 5, geometry.boxY - 5, geometry.boxWidth + 10, geometry.boxHeight + 10);
+      context.restore();
+    }
+  }, [assets, edit, overlay, campaignTitle]);
+
+  function canvasPoint(clientX, clientY) {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    return { x: (clientX - rect.left) * canvas.width / rect.width, y: (clientY - rect.top) * canvas.height / rect.height };
+  }
+  function emitPosition(positionX, positionY) {
+    onChange({ position: "custom", positionX: clamp(positionX, 0, 100), positionY: clamp(positionY, 0, 100) });
+  }
+  function handlePointerDown(event) {
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
+    const point = canvasPoint(event.clientX, event.clientY);
+    const geometry = getEventOverlayGeometry(context, canvas.width, canvas.height, overlayRef.current, campaignTitle);
+    if (!geometry || point.x < geometry.boxX || point.x > geometry.boxX + geometry.boxWidth || point.y < geometry.boxY || point.y > geometry.boxY + geometry.boxHeight) return;
+    event.currentTarget.focus();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { pointerId: event.pointerId, point, overlay: overlayRef.current, geometry };
+    setDragging(true);
+  }
+  function handlePointerMove(event) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const point = canvasPoint(event.clientX, event.clientY);
+    const availableX = Math.max(1, canvasRef.current.width - drag.geometry.marginX * 2 - drag.geometry.boxWidth);
+    const availableY = Math.max(1, canvasRef.current.height - drag.geometry.marginY * 2 - drag.geometry.boxHeight);
+    emitPosition(drag.overlay.positionX + (point.x - drag.point.x) / availableX * 100, drag.overlay.positionY + (point.y - drag.point.y) / availableY * 100);
+  }
+  function handlePointerEnd(event) {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    dragRef.current = null;
+    setDragging(false);
+  }
+  function handleKeyDown(event) {
+    const step = event.shiftKey ? 4 : 1;
+    const movement = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
+    if (!movement) return;
+    event.preventDefault();
+    emitPosition(overlayRef.current.positionX + movement[0], overlayRef.current.positionY + movement[1]);
+  }
+
+  return <canvas ref={canvasRef} className={clsx("photo-editor-canvas overlay-editor-canvas", dragging && "is-interacting")} tabIndex={0} role="img" aria-label="Interactive event banner position. Drag the banner or use arrow keys to move it." onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerEnd} onPointerCancel={handlePointerEnd} onKeyDown={handleKeyDown} />;
 }
 
 function InteractivePhotoCanvas({ media, template, eventOverlay, campaignTitle, onChange }) {
@@ -1409,6 +1507,51 @@ function LoadingScreen() {
   return <div className="loading-screen"><div className="loading-brand"><img src="/brand/dilg-logo.png" alt="DILG" /><span /></div><strong>Opening Social Studio…</strong></div>;
 }
 
+function AccountSetupScreen({ facebookDirectory, refreshFacebookDirectory }) {
+  return (
+    <main className="account-access-shell">
+      <Toaster richColors position="top-right" closeButton />
+      <div className="account-access-brand"><img src="/brand/dilg-logo.png" alt="DILG seal" /><div><strong>DILG Social Studio</strong><span>Region XII multi-office publishing</span></div></div>
+      <section className="account-access-card setup-required-card">
+        <div className="account-access-heading"><span className="section-kicker"><Settings size={14} /> One-time platform setup</span><h1>Prepare secure accounts for every Region XII office</h1><p>Once the regional administrator completes these steps, staff can sign in concurrently and work only with Facebook Pages they are authorized to manage.</p></div>
+        <FacebookAdminSetup missing={facebookDirectory.missing} onRefresh={refreshFacebookDirectory} />
+      </section>
+    </main>
+  );
+}
+
+function AccountSignInScreen() {
+  return (
+    <main className="account-access-shell">
+      <Toaster richColors position="top-right" closeButton />
+      <div className="account-access-brand"><img src="/brand/dilg-logo.png" alt="DILG seal" /><div><strong>DILG Social Studio</strong><span>Region XII multi-office publishing</span></div></div>
+      <section className="account-access-card sign-in-card">
+        <div className="sign-in-seal"><img src="/brand/dilg-logo.png" alt="" /></div>
+        <span className="section-kicker"><ShieldCheck size={14} /> Secure staff account</span>
+        <h1>Sign in to your office workspace</h1>
+        <p>Use the Facebook account that has access to your official Province, City, or Regional Office Page.</p>
+        <div className="account-isolation-list">
+          <span><CheckCircle2 size={17} /><strong>Your own account session</strong><small>Other users cannot change your selected Page.</small></span>
+          <span><CheckCircle2 size={17} /><strong>Authorized Pages only</strong><small>Meta decides which Pages your account can manage.</small></span>
+          <span><CheckCircle2 size={17} /><strong>Page-isolated workspace</strong><small>Campaigns and templates are separated by account and Page on this device.</small></span>
+        </div>
+        <a className="primary-button account-sign-in-button" href="/api/facebook/oauth/start"><ExternalLink size={18} /> Continue with Facebook</a>
+        <small className="account-privacy-note"><KeyRound size={14} /> Page tokens remain encrypted on the server and never enter browser storage.</small>
+      </section>
+    </main>
+  );
+}
+
+function normalizeFacebookDirectory(directory, preferredPageId = "") {
+  const pages = Array.isArray(directory?.pages) ? directory.pages : [];
+  const accountKey = String(directory?.accountKey || "");
+  const storedPageId = typeof window === "undefined" || !accountKey ? "" : window.sessionStorage.getItem(`${PAGE_SELECTION_STORAGE}:${accountKey}`) || "";
+  const selectedPageId = [preferredPageId, storedPageId, directory?.selectedPageId, pages[0]?.id]
+    .find((pageId) => pageId && pages.some((page) => page.id === pageId)) || "";
+  if (typeof window !== "undefined" && accountKey && selectedPageId) window.sessionStorage.setItem(`${PAGE_SELECTION_STORAGE}:${accountKey}`, selectedPageId);
+  return { ...EMPTY_FACEBOOK_DIRECTORY, ...directory, loading: false, pages, selectedPageId };
+}
+
 async function requestJson(url, options = {}) {
   const response = await fetch(url, { ...options, cache: "no-store" });
   const payload = await response.json().catch(() => ({}));
@@ -1558,27 +1701,9 @@ function getRotatedImage(image, rotationValue) {
 }
 
 function drawEventOverlay(context, width, height, overlayValue, campaignTitle) {
-  const overlay = normalizeEventOverlay(overlayValue);
-  const title = (overlay.title || campaignTitle || "").trim();
-  const meta = [formatEventDate(overlay.date), overlay.location.trim()].filter(Boolean).join("  ·  ");
-  if (!overlay.enabled || (!title && !meta)) return;
-
-  const marginX = width * .04;
-  const marginY = height * .045;
-  const boxWidth = width * .72;
-  const paddingX = Math.max(18, width * .032);
-  const paddingY = Math.max(14, width * .018);
-  const stripeHeight = Math.max(7, width * .007);
-  const titleSize = clamp(width * .032, 24, 48);
-  const titleLineHeight = titleSize * 1.1;
-  const metaSize = clamp(titleSize * .48, 14, 22);
-  context.font = `800 ${titleSize}px Arial, sans-serif`;
-  const titleLines = title ? wrapCanvasText(context, title.toUpperCase(), boxWidth - paddingX * 2, 2) : [];
-  const boxHeight = stripeHeight + paddingY * 2 + titleLines.length * titleLineHeight + (meta ? metaSize * 1.45 : 0);
-
-  const [, horizontal] = overlay.position.split("-");
-  const boxX = horizontal === "right" ? width - marginX - boxWidth : horizontal === "center" ? (width - boxWidth) / 2 : marginX;
-  const boxY = overlay.position.startsWith("top") ? marginY : height - marginY - boxHeight;
+  const geometry = getEventOverlayGeometry(context, width, height, overlayValue, campaignTitle);
+  if (!geometry) return;
+  const { boxX, boxY, boxWidth, boxHeight, paddingX, paddingY, stripeHeight, titleSize, titleLineHeight, metaSize, titleLines, meta } = geometry;
   context.save();
   context.fillStyle = "rgba(9, 12, 27, .92)";
   context.beginPath();
@@ -1599,6 +1724,31 @@ function drawEventOverlay(context, width, height, overlayValue, campaignTitle) {
     context.fillText(fitCanvasText(context, meta, boxWidth - paddingX * 2), boxX + paddingX, textY + metaSize * .35);
   }
   context.restore();
+}
+
+function getEventOverlayGeometry(context, width, height, overlayValue, campaignTitle) {
+  const overlay = normalizeEventOverlay(overlayValue);
+  const title = (overlay.title || campaignTitle || "").trim();
+  const meta = [formatEventDate(overlay.date), overlay.location.trim()].filter(Boolean).join("  ·  ");
+  if (!overlay.enabled || (!title && !meta)) return null;
+
+  const marginX = width * .04;
+  const marginY = height * .045;
+  const boxWidth = width * .72;
+  const paddingX = Math.max(18, width * .032);
+  const paddingY = Math.max(14, width * .018);
+  const stripeHeight = Math.max(7, width * .007);
+  const titleSize = clamp(width * .032, 24, 48);
+  const titleLineHeight = titleSize * 1.1;
+  const metaSize = clamp(titleSize * .48, 14, 22);
+  context.font = `800 ${titleSize}px Arial, sans-serif`;
+  const titleLines = title ? wrapCanvasText(context, title.toUpperCase(), boxWidth - paddingX * 2, 2) : [];
+  const boxHeight = stripeHeight + paddingY * 2 + titleLines.length * titleLineHeight + (meta ? metaSize * 1.45 : 0);
+  const availableX = Math.max(0, width - marginX * 2 - boxWidth);
+  const availableY = Math.max(0, height - marginY * 2 - boxHeight);
+  const boxX = marginX + availableX * overlay.positionX / 100;
+  const boxY = marginY + availableY * overlay.positionY / 100;
+  return { overlay, title, meta, marginX, marginY, boxX, boxY, boxWidth, boxHeight, paddingX, paddingY, stripeHeight, titleSize, titleLineHeight, metaSize, titleLines };
 }
 
 function drawBrandStripe(context, x, y, width, height) {
@@ -1706,12 +1856,20 @@ function normalizeEventOverlay(value = {}) {
   const input = value && typeof value === "object" ? value : {};
   const legacyPosition = input.position === "top" ? "top-left" : input.position === "bottom" ? "bottom-left" : input.position;
   const positions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"];
+  const presetPositions = {
+    "top-left": [0, 0], "top-center": [50, 0], "top-right": [100, 0],
+    "bottom-left": [0, 100], "bottom-center": [50, 100], "bottom-right": [100, 100],
+  };
+  const resolvedPosition = positions.includes(legacyPosition) ? legacyPosition : DEFAULT_EVENT_OVERLAY.position;
+  const preset = presetPositions[resolvedPosition];
   return {
     enabled: Boolean(input.enabled),
     title: String(input.title || ""),
     date: String(input.date || ""),
     location: String(input.location || ""),
-    position: positions.includes(legacyPosition) ? legacyPosition : DEFAULT_EVENT_OVERLAY.position,
+    position: input.position === "custom" ? "custom" : resolvedPosition,
+    positionX: clamp(Number.isFinite(Number(input.positionX)) ? Number(input.positionX) : preset[0], 0, 100),
+    positionY: clamp(Number.isFinite(Number(input.positionY)) ? Number(input.positionY) : preset[1], 0, 100),
   };
 }
 

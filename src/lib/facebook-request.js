@@ -1,29 +1,23 @@
 import "server-only";
 
 import { getFacebookOAuthReadiness, getSelectedOAuthFacebookConfig } from "@/lib/facebook-connections";
-import { FacebookApiError, getFacebookConfig, requirePublishAccess, verifyPublishKeyValue } from "@/lib/facebook-server";
+import { FacebookApiError } from "@/lib/facebook-server";
 
-export async function resolveFacebookConfig(request, { allowMissing = false } = {}) {
-  const oauthConfig = await getSelectedOAuthFacebookConfig(request);
-  if (oauthConfig) return { ...oauthConfig, oauthAvailable: true, connectionRequired: false };
-
-  const legacy = getFacebookConfig({ allowMissing: true });
+export async function resolveFacebookConfig(request, { allowMissing = false, pageId = "" } = {}) {
   const oauthReadiness = getFacebookOAuthReadiness();
-  if (legacy.configured) {
-    requirePublishAccess(request, legacy);
-    return { ...legacy, mode: "legacy", oauthAvailable: oauthReadiness.available, connectionRequired: false };
+  if (!oauthReadiness.available) {
+    if (allowMissing) return { configured: false, missing: oauthReadiness.missing, mode: "unconfigured", oauthAvailable: false, connectionRequired: false };
+    throw new FacebookApiError("Facebook account access is not configured on this deployment.", 503, { missing: oauthReadiness.missing });
   }
+
+  const oauthConfig = await getSelectedOAuthFacebookConfig(request, pageId);
+  if (oauthConfig) return { ...oauthConfig, oauthAvailable: true, connectionRequired: false };
   if (allowMissing) {
-    return { ...legacy, mode: "unconfigured", oauthAvailable: oauthReadiness.available, connectionRequired: oauthReadiness.available };
+    return { configured: false, missing: [], mode: "account", oauthAvailable: true, connectionRequired: true };
   }
-  if (oauthReadiness.available) throw new FacebookApiError("Connect and select a Facebook Page before publishing.", 401);
-  throw new FacebookApiError("Facebook publishing is not configured on this deployment.", 503, { missing: [...new Set([...legacy.missing, ...oauthReadiness.missing])] });
+  throw new FacebookApiError("Sign in with Facebook and choose a Page before publishing.", 401);
 }
 
-export async function authorizeMediaUpload(request, publishKey) {
-  const oauthConfig = await getSelectedOAuthFacebookConfig(request);
-  if (oauthConfig) return oauthConfig;
-  const legacy = getFacebookConfig();
-  verifyPublishKeyValue(publishKey, legacy);
-  return { ...legacy, mode: "legacy" };
+export async function authorizeMediaUpload(request, pageId) {
+  return resolveFacebookConfig(request, { pageId });
 }

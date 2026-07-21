@@ -108,10 +108,15 @@ export const INITIAL_STATE = {
   ],
 };
 
-export function loadStudioState() {
+export function loadStudioState(scope = "") {
   if (typeof window === "undefined") return INITIAL_STATE;
   try {
-    const saved = window.localStorage.getItem(STORAGE_KEY);
+    const scopedKey = getScopedStorageKey(scope);
+    let saved = window.localStorage.getItem(scopedKey);
+    if (!saved && scope && !window.localStorage.getItem(`${STORAGE_KEY}:scoped-migration-complete`)) {
+      saved = window.localStorage.getItem(STORAGE_KEY);
+      if (saved) window.localStorage.setItem(`${STORAGE_KEY}:scoped-migration-complete`, "true");
+    }
     if (!saved) return INITIAL_STATE;
     const parsed = JSON.parse(saved);
     const settings = { ...INITIAL_STATE.settings, ...parsed.settings };
@@ -132,9 +137,14 @@ export function loadStudioState() {
   }
 }
 
-export function saveStudioState(state) {
+export function saveStudioState(state, scope = "") {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  window.localStorage.setItem(getScopedStorageKey(scope), JSON.stringify(state));
+}
+
+function getScopedStorageKey(scope) {
+  const safeScope = String(scope || "").replace(/[^A-Za-z0-9:_-]/g, "").slice(0, 96);
+  return safeScope ? `${STORAGE_KEY}:${safeScope}` : STORAGE_KEY;
 }
 
 export function createId(prefix) {

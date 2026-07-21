@@ -81,6 +81,7 @@ export async function getFacebookConnections(request) {
     available: true,
     connected: pages.length > 0,
     missing: [],
+    accountKey: createHash("sha256").update(`facebook-account:${sessions[0].meta_user_id}`).digest("hex").slice(0, 24),
     user: { name: sessions[0].user_name || "Facebook user" },
     selectedPageId: sessions[0].selected_page_id || pages[0]?.page_id || "",
     pages: pages.map((page) => ({
@@ -92,7 +93,7 @@ export async function getFacebookConnections(request) {
   };
 }
 
-export async function getSelectedOAuthFacebookConfig(request) {
+export async function getSelectedOAuthFacebookConfig(request, pageId = "") {
   const readiness = getFacebookOAuthReadiness();
   if (!readiness.available) return null;
   const sessionId = validSessionId(readRequestCookie(request, FACEBOOK_SESSION_COOKIE));
@@ -100,25 +101,26 @@ export async function getSelectedOAuthFacebookConfig(request) {
   await ensureSchema();
   const sql = getSql();
   const sessionHash = hashSession(sessionId);
+  const requestedPageId = clean(pageId || request.headers.get("x-facebook-page-id"));
   const rows = await sql`
     SELECT p.page_id, p.page_name, p.page_token, p.picture_url
     FROM dilg_facebook_sessions s
     JOIN dilg_facebook_pages p
       ON p.session_hash = s.session_hash
-      AND p.page_id = COALESCE(s.selected_page_id, p.page_id)
+      AND p.page_id = COALESCE(NULLIF(${requestedPageId}, ''), s.selected_page_id, p.page_id)
     WHERE s.session_hash = ${sessionHash} AND s.expires_at > NOW()
     ORDER BY CASE WHEN p.page_id = s.selected_page_id THEN 0 ELSE 1 END, p.page_name ASC
     LIMIT 1
   `;
+  if (!rows.length && requestedPageId) throw new FacebookApiError("That Facebook Page is not available to this account.", 403);
   if (!rows.length) return null;
   return {
     configured: true,
-    mode: "oauth",
+    mode: "account",
     pageId: rows[0].page_id,
     pageName: rows[0].page_name,
     pagePicture: rows[0].picture_url || "",
     accessToken: decryptToken(rows[0].page_token),
-    publishKey: "",
     graphVersion: clean(process.env.FACEBOOK_GRAPH_API_VERSION) || "v25.0",
     missing: [],
   };
@@ -154,17 +156,6 @@ export async function saveFacebookConnections({ sessionId, user, pages }) {
     }
   });
   return { selectedPageId };
-}
-
-export async function selectFacebookPage(request, pageId) {
-  const sessionId = validSessionId(readRequestCookie(request, FACEBOOK_SESSION_COOKIE));
-  if (!sessionId) throw new FacebookApiError("Connect Facebook before selecting a Page.", 401);
-  await ensureSchema();
-  const sql = getSql();
-  const sessionHash = hashSession(sessionId);
-  const pages = await sql`SELECT page_id FROM dilg_facebook_pages WHERE session_hash = ${sessionHash} AND page_id = ${clean(pageId)} LIMIT 1`;
-  if (!pages.length) throw new FacebookApiError("That Facebook Page is not available in this connection.", 403);
-  await sql`UPDATE dilg_facebook_sessions SET selected_page_id = ${clean(pageId)}, updated_at = NOW() WHERE session_hash = ${sessionHash} AND expires_at > NOW()`;
 }
 
 export async function deleteFacebookConnection(request) {
