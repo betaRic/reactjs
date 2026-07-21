@@ -490,7 +490,7 @@ function Topbar({ activeView, organization, setMobileMenuOpen, openComposer }) {
   return (
     <header className="topbar">
       <button className="mobile-menu-button" onClick={() => setMobileMenuOpen(true)} aria-label="Open menu"><Menu size={21} /></button>
-      <div><span className="topbar-context">{organization}</span><h1>{title}</h1></div>
+      <div className="topbar-title"><img className="topbar-logo" src="/brand/dilg-logo.png" alt="" /><div><span className="topbar-context">{organization}</span><h1>{title}</h1></div></div>
       <div className="topbar-actions">
         <button className="icon-button" aria-label="Notifications"><Bell size={19} /><span className="notification-dot" /></button>
         <button className="topbar-create" onClick={openComposer}><Plus size={18} /> Create</button>

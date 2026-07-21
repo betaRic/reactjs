@@ -6,6 +6,7 @@ export const metadata = {
   metadataBase: new URL(siteUrl),
   title: "DILG Social Studio",
   description: "A modern campaign planning and Facebook publishing workspace for DILG offices across Region XII.",
+  applicationName: "DILG Social Studio",
   openGraph: {
     title: "DILG Social Studio",
     description: "Plan, review, and publish community updates from one calm workspace.",
