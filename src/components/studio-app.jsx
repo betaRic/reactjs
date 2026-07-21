@@ -20,6 +20,7 @@ import {
   CloudUpload,
   ExternalLink,
   FileImage,
+  Grid3X3,
   ImagePlus,
   Images,
   Newspaper,
@@ -29,6 +30,7 @@ import {
   GripVertical,
   Menu,
   MessageSquareText,
+  Move,
   MoreHorizontal,
   PencilLine,
   Plus,
@@ -47,6 +49,8 @@ import {
   WandSparkles,
   Wifi,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
@@ -991,23 +995,30 @@ function Composer({ draft, setDraft, templates, settings, publishKey, onClose, o
 
 function PhotoEditor({ media, template, eventOverlay, campaignTitle, onChange, onClose }) {
   const edit = normalizePhotoEdit(media.edit);
+  const [gridVisible, setGridVisible] = useState(false);
   function change(key, value) { onChange({ ...edit, [key]: value }); }
   function rotate(amount) { change("rotation", (edit.rotation + amount + 360) % 360); }
+  function zoom(amount) { change("zoom", clamp(edit.zoom + amount, 1, 3)); }
   return (
     <motion.div className="photo-editor-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <motion.section className="photo-editor" role="dialog" aria-modal="true" aria-label={`Edit ${media.name}`} initial={{ opacity: 0, y: 18, scale: .97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: .98 }}>
-        <header><div><span className="section-kicker"><Crop size={14} /> Photo editor</span><h3>Fit photo to template</h3><p>Adjust only this photo. The template and event banner remain locked.</p></div><button className="icon-button" onClick={onClose} aria-label="Close photo editor"><X size={19} /></button></header>
+        <header><div><span className="section-kicker"><Crop size={14} /> Direct photo editor</span><h3>Move the photo into place</h3><p>Drag the image, scroll or pinch to zoom, and use arrow keys for precise nudging. The template stays locked.</p></div><button className="icon-button" onClick={onClose} aria-label="Close photo editor"><X size={19} /></button></header>
         <div className="photo-editor-body">
           <div className="photo-editor-stage">
-            <div className="photo-editor-canvas-wrap"><ComposedPhotoPreview media={media} template={template} eventOverlay={eventOverlay} campaignTitle={campaignTitle} className="photo-editor-canvas" /></div>
-            <span><Crop size={15} /> The visible area is the exact crop that will be published.</span>
-          </div>
-          <div className="photo-editor-controls">
-            <EditRange label="Zoom" value={`${Math.round(edit.zoom * 100)}%`} min="1" max="3" step="0.05" current={edit.zoom} onChange={(value) => change("zoom", Number(value))} />
-            <EditRange label="Horizontal crop" value={`${Math.round(edit.positionX)}%`} min="0" max="100" step="1" current={edit.positionX} onChange={(value) => change("positionX", Number(value))} />
-            <EditRange label="Vertical crop" value={`${Math.round(edit.positionY)}%`} min="0" max="100" step="1" current={edit.positionY} onChange={(value) => change("positionY", Number(value))} />
-            <div className="rotation-controls"><span>Rotation <strong>{edit.rotation}°</strong></span><div><button type="button" onClick={() => rotate(-90)}><RotateCcw size={17} /> Left</button><button type="button" onClick={() => rotate(90)}><RotateCw size={17} /> Right</button></div></div>
-            <div className="editor-tip"><WandSparkles size={17} /><span>Start with zoom, then use the horizontal and vertical controls to place faces and important details inside the frame.</span></div>
+            <div className={clsx("photo-editor-canvas-wrap", gridVisible && "show-grid")}>
+              <InteractivePhotoCanvas media={media} template={template} eventOverlay={eventOverlay} campaignTitle={campaignTitle} onChange={onChange} />
+              {gridVisible && <div className="crop-grid" aria-hidden="true"><i /><i /><i /><i /></div>}
+              <div className="drag-cue" aria-hidden="true"><Move size={18} /><span>Drag photo</span></div>
+            </div>
+            <div className="direct-edit-toolbar" role="toolbar" aria-label="Photo editing tools">
+              <div className="zoom-tool"><button type="button" onClick={() => zoom(-.1)} disabled={edit.zoom <= 1} aria-label="Zoom out"><ZoomOut size={18} /></button><output>{Math.round(edit.zoom * 100)}%</output><button type="button" onClick={() => zoom(.1)} disabled={edit.zoom >= 3} aria-label="Zoom in"><ZoomIn size={18} /></button></div>
+              <span className="toolbar-divider" />
+              <button type="button" onClick={() => rotate(-90)} title="Rotate left"><RotateCcw size={18} /><span>Left</span></button>
+              <button type="button" onClick={() => rotate(90)} title="Rotate right"><RotateCw size={18} /><span>Right</span></button>
+              <button type="button" onClick={() => onChange({ ...edit, positionX: 50, positionY: 50 })} title="Center photo"><Move size={18} /><span>Center</span></button>
+              <button type="button" className={gridVisible ? "active" : ""} aria-pressed={gridVisible} onClick={() => setGridVisible((current) => !current)} title="Toggle alignment grid"><Grid3X3 size={18} /><span>Grid</span></button>
+            </div>
+            <div className="direct-edit-help"><span><Move size={15} /> Drag to reposition</span><span><ZoomIn size={15} /> Scroll or pinch to zoom</span><span>⌨ Arrow keys nudge · Shift moves farther</span></div>
           </div>
         </div>
         <footer><button className="secondary-button" onClick={() => onChange({ ...DEFAULT_PHOTO_EDIT })}><RefreshCcw size={17} /> Reset photo</button><button className="primary-button" onClick={onClose}><Check size={17} /> Done editing</button></footer>
@@ -1016,8 +1027,124 @@ function PhotoEditor({ media, template, eventOverlay, campaignTitle, onChange, o
   );
 }
 
-function EditRange({ label, value, current, onChange, ...rangeProps }) {
-  return <label className="edit-range"><span>{label}<strong>{value}</strong></span><input type="range" value={current} onChange={(event) => onChange(event.target.value)} {...rangeProps} /></label>;
+function InteractivePhotoCanvas({ media, template, eventOverlay, campaignTitle, onChange }) {
+  const canvasRef = useRef(null);
+  const assetsRef = useRef(null);
+  const editRef = useRef(normalizePhotoEdit(media.edit));
+  const pointersRef = useRef(new Map());
+  const gestureRef = useRef(null);
+  const wheelHandlerRef = useRef(null);
+  const [assets, setAssets] = useState(null);
+  const [interacting, setInteracting] = useState(false);
+  const edit = useMemo(() => normalizePhotoEdit(media.edit), [media.edit]);
+  const overlay = useMemo(() => normalizeEventOverlay(eventOverlay), [eventOverlay]);
+
+  useEffect(() => { editRef.current = edit; }, [edit]);
+  useEffect(() => {
+    let active = true;
+    Promise.all([loadBrowserImage(media.src), template?.image ? loadBrowserImage(template.image) : null]).then(([source, templateImage]) => {
+      if (!active) return;
+      const nextAssets = { source, templateImage };
+      assetsRef.current = nextAssets;
+      setAssets(nextAssets);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [media.src, template?.image]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !assets) return;
+    const width = assets.templateImage?.naturalWidth || assets.source.naturalWidth;
+    const height = assets.templateImage?.naturalHeight || assets.source.naturalHeight;
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    paintPhotoComposition(canvas.getContext("2d"), assets.source, assets.templateImage, width, height, edit, overlay, campaignTitle);
+  }, [assets, edit, overlay, campaignTitle]);
+
+  function emitEdit(next) {
+    const normalized = normalizePhotoEdit(next);
+    editRef.current = normalized;
+    onChange(normalized);
+  }
+  function canvasPoint(clientX, clientY) {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    return { x: (clientX - rect.left) * canvas.width / rect.width, y: (clientY - rect.top) * canvas.height / rect.height };
+  }
+  function beginGesture() {
+    const points = [...pointersRef.current.values()];
+    if (points.length >= 2) {
+      const [first, second] = points;
+      const midpoint = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+      gestureRef.current = { kind: "pinch", distance: Math.hypot(second.x - first.x, second.y - first.y), anchor: canvasPoint(midpoint.x, midpoint.y), edit: editRef.current };
+    } else if (points.length === 1) {
+      gestureRef.current = { kind: "drag", point: points[0], edit: editRef.current };
+    } else gestureRef.current = null;
+  }
+  function handlePointerDown(event) {
+    event.currentTarget.focus();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    setInteracting(true);
+    beginGesture();
+  }
+  function handlePointerMove(event) {
+    if (!pointersRef.current.has(event.pointerId) || !assetsRef.current) return;
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const points = [...pointersRef.current.values()];
+    const gesture = gestureRef.current;
+    const canvas = canvasRef.current;
+    if (points.length >= 2) {
+      if (!gesture || gesture.kind !== "pinch") { beginGesture(); return; }
+      const [first, second] = points;
+      const distance = Math.hypot(second.x - first.x, second.y - first.y);
+      const midpoint = canvasPoint((first.x + second.x) / 2, (first.y + second.y) / 2);
+      const nextZoom = clamp(gesture.edit.zoom * distance / Math.max(gesture.distance, 1), 1, 3);
+      emitEdit(zoomPhotoEditAtAnchor(assetsRef.current.source, canvas.width, canvas.height, gesture.edit, nextZoom, gesture.anchor, midpoint));
+    } else if (points.length === 1 && gesture?.kind === "drag") {
+      const rect = canvas.getBoundingClientRect();
+      const deltaX = (points[0].x - gesture.point.x) * canvas.width / rect.width;
+      const deltaY = (points[0].y - gesture.point.y) * canvas.height / rect.height;
+      emitEdit(panPhotoEditByPixels(assetsRef.current.source, canvas.width, canvas.height, gesture.edit, deltaX, deltaY));
+    }
+  }
+  function handlePointerEnd(event) {
+    pointersRef.current.delete(event.pointerId);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setInteracting(pointersRef.current.size > 0);
+    beginGesture();
+  }
+  function handleWheel(event) {
+    if (!assetsRef.current) return;
+    event.preventDefault();
+    const canvas = canvasRef.current;
+    const anchor = canvasPoint(event.clientX, event.clientY);
+    const nextZoom = clamp(editRef.current.zoom * Math.exp(-event.deltaY * .0015), 1, 3);
+    emitEdit(zoomPhotoEditAtAnchor(assetsRef.current.source, canvas.width, canvas.height, editRef.current, nextZoom, anchor, anchor));
+  }
+  useEffect(() => { wheelHandlerRef.current = handleWheel; });
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const listener = (event) => wheelHandlerRef.current?.(event);
+    canvas.addEventListener("wheel", listener, { passive: false });
+    return () => canvas.removeEventListener("wheel", listener);
+  }, []);
+  function handleKeyDown(event) {
+    if (!assetsRef.current) return;
+    const canvas = canvasRef.current;
+    const step = event.shiftKey ? 18 : 5;
+    const movement = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
+    if (movement) {
+      event.preventDefault();
+      emitEdit(panPhotoEditByPixels(assetsRef.current.source, canvas.width, canvas.height, editRef.current, movement[0], movement[1]));
+    } else if (["+", "=", "-", "_"].includes(event.key)) {
+      event.preventDefault();
+      const anchor = { x: canvas.width / 2, y: canvas.height / 2 };
+      const amount = ["+", "="].includes(event.key) ? .1 : -.1;
+      emitEdit(zoomPhotoEditAtAnchor(assetsRef.current.source, canvas.width, canvas.height, editRef.current, clamp(editRef.current.zoom + amount, 1, 3), anchor, anchor));
+    }
+  }
+
+  return <canvas ref={canvasRef} className={clsx("photo-editor-canvas", interacting && "is-interacting")} tabIndex={0} role="img" aria-label="Interactive photo crop. Drag to move, scroll or pinch to zoom, and use arrow keys to nudge." onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerEnd} onPointerCancel={handlePointerEnd} onKeyDown={handleKeyDown} />;
 }
 
 function ComposedPhotoPreview({ media, template, eventOverlay, campaignTitle, className }) {
@@ -1182,6 +1309,11 @@ function paintPhotoComposition(context, source, template, width, height, edit, e
 }
 
 function drawEditedImageCover(context, image, x, y, width, height, editValue) {
+  const geometry = getPhotoGeometry(image, width, height, editValue, x, y);
+  context.drawImage(geometry.source, geometry.drawX, geometry.drawY, geometry.drawWidth, geometry.drawHeight);
+}
+
+function getPhotoGeometry(image, width, height, editValue, x = 0, y = 0) {
   const edit = normalizePhotoEdit(editValue);
   const source = getRotatedImage(image, edit.rotation);
   const sourceWidth = source.naturalWidth || source.width;
@@ -1191,7 +1323,37 @@ function drawEditedImageCover(context, image, x, y, width, height, editValue) {
   const drawHeight = sourceHeight * scale;
   const drawX = x + (width - drawWidth) * (edit.positionX / 100);
   const drawY = y + (height - drawHeight) * (edit.positionY / 100);
-  context.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+  return { source, drawWidth, drawHeight, drawX, drawY };
+}
+
+function panPhotoEditByPixels(image, width, height, editValue, deltaX, deltaY) {
+  const edit = normalizePhotoEdit(editValue);
+  const geometry = getPhotoGeometry(image, width, height, edit);
+  const overflowX = Math.max(0, geometry.drawWidth - width);
+  const overflowY = Math.max(0, geometry.drawHeight - height);
+  return normalizePhotoEdit({
+    ...edit,
+    positionX: overflowX > .5 ? (-(geometry.drawX + deltaX) / overflowX) * 100 : 50,
+    positionY: overflowY > .5 ? (-(geometry.drawY + deltaY) / overflowY) * 100 : 50,
+  });
+}
+
+function zoomPhotoEditAtAnchor(image, width, height, editValue, nextZoom, anchorFrom, anchorTo) {
+  const edit = normalizePhotoEdit(editValue);
+  const current = getPhotoGeometry(image, width, height, edit);
+  const sourceX = (anchorFrom.x - current.drawX) / current.drawWidth;
+  const sourceY = (anchorFrom.y - current.drawY) / current.drawHeight;
+  const next = normalizePhotoEdit({ ...edit, zoom: nextZoom });
+  const nextGeometry = getPhotoGeometry(image, width, height, next);
+  const overflowX = Math.max(0, nextGeometry.drawWidth - width);
+  const overflowY = Math.max(0, nextGeometry.drawHeight - height);
+  const desiredX = anchorTo.x - sourceX * nextGeometry.drawWidth;
+  const desiredY = anchorTo.y - sourceY * nextGeometry.drawHeight;
+  return normalizePhotoEdit({
+    ...next,
+    positionX: overflowX > .5 ? (-desiredX / overflowX) * 100 : 50,
+    positionY: overflowY > .5 ? (-desiredY / overflowY) * 100 : 50,
+  });
 }
 
 function getRotatedImage(image, rotationValue) {
