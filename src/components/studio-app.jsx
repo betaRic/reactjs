@@ -897,7 +897,7 @@ function FacebookConnection({ facebookDirectory, setFacebookDirectory, refreshFa
       )}
 
       {connection?.connected && <div className="connected-page test-result"><div className="connected-page-avatar">{connection.page.picture ? <img src={connection.page.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>Connection test passed: {connection.page.name}</strong><span>Page ID {connection.page.id} · Graph API {connection.graphVersion} · secure account connection</span></div>{connection.page.link && <a href={connection.page.link} target="_blank" rel="noreferrer">Open Page <ExternalLink size={14} /></a>}</div>}
-      {connection?.connected && <div className={clsx("video-storage-status", connection.videoStorageConfigured ? "ready" : "missing")}><CloudUpload size={17} /><div><strong>{connection.videoStorageConfigured ? "Video storage ready" : "Video storage not connected"}</strong><span>{connection.videoStorageConfigured ? "Vercel Blob can accept campaign videos." : "Create a public Vercel Blob store to enable video uploads."}</span></div></div>}
+      {connection?.connected && <div className={clsx("video-storage-status", connection.videoStorageConfigured ? "ready" : "missing")}><CloudUpload size={17} /><div><strong>{connection.videoStorageConfigured ? "Video storage ready" : "Video storage not connected"}</strong><span>{connection.videoStorageConfigured ? `Vercel Blob ${connection.videoStorageMode === "oidc" ? "OIDC" : "storage"} can accept campaign videos.` : "Create a public Vercel Blob store to enable video uploads."}</span></div></div>}
       {connection && !connection.connected && <div className="connection-error">{connection.configured === false ? `Server variables still needed: ${connection.missing.join(", ")}` : connection.error}</div>}
       {facebookDirectory.error && <div className="connection-error">{facebookDirectory.error} <button type="button" onClick={() => refreshFacebookDirectory().catch(() => {})}>Try again</button></div>}
     </section>
@@ -909,7 +909,7 @@ function FacebookAdminSetup({ missing = [], onRefresh }) {
   const callbackUrl = typeof window === "undefined"
     ? "https://socialmedia-dilg12.vercel.app/api/facebook/oauth/callback"
     : `${window.location.origin}/api/facebook/oauth/callback`;
-  const requiredVariables = ["FACEBOOK_APP_ID", "FACEBOOK_APP_SECRET", "FACEBOOK_TOKEN_ENCRYPTION_KEY", "DATABASE_URL"];
+  const requiredVariables = ["FACEBOOK_APP_ID", "FACEBOOK_APP_SECRET", "FACEBOOK_TOKEN_ENCRYPTION_KEY", "DATABASE_URL or POSTGRES_URL"];
   const configuredCount = requiredVariables.filter((name) => !missing.includes(name)).length;
 
   async function copyValue(value, label) {
@@ -956,7 +956,7 @@ function FacebookAdminSetup({ missing = [], onRefresh }) {
         </li>
         <li>
           <span>3</span>
-          <div><strong>Connect one Postgres database to the Vercel project</strong><p>In Vercel Marketplace, add a Postgres provider such as Neon and connect it to this project. The integration supplies <code>DATABASE_URL</code>; the database safely separates each browser session and its authorized Pages.</p><a href="https://vercel.com/docs/postgres" target="_blank" rel="noreferrer">Open Vercel Postgres guide <ExternalLink size={14} /></a></div>
+          <div><strong>Connect one Postgres database to the Vercel project</strong><p>In Vercel Marketplace, add Neon and connect it to this project. The application accepts Neon&apos;s pooled <code>POSTGRES_URL</code> or <code>DATABASE_URL</code>; the database stores encrypted Page connections and server-approved office memberships.</p><a href="https://vercel.com/docs/postgres" target="_blank" rel="noreferrer">Open Vercel Postgres guide <ExternalLink size={14} /></a></div>
         </li>
         <li>
           <span>4</span>
