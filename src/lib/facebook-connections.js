@@ -7,7 +7,7 @@ import { FacebookApiError } from "@/lib/facebook-server";
 
 export const FACEBOOK_SESSION_COOKIE = "dilg_meta_session";
 export const FACEBOOK_OAUTH_STATE_COOKIE = "dilg_meta_oauth_state";
-export const FACEBOOK_SESSION_SECONDS = 60 * 60 * 24 * 30;
+export const FACEBOOK_SESSION_SECONDS = 60 * 60 * 12;
 
 let schemaPromise;
 
@@ -274,6 +274,7 @@ async function ensureSchema() {
         )
       `;
       await sql`CREATE INDEX IF NOT EXISTS dilg_facebook_pages_session_idx ON dilg_facebook_pages(session_hash)`;
+      await sql`UPDATE dilg_facebook_sessions SET expires_at = LEAST(expires_at, NOW() + INTERVAL '12 hours')`;
       await ensureTenantSchema();
       await bootstrapExistingStaffAdministrator();
     })().catch((error) => {
