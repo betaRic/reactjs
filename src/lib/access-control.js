@@ -156,6 +156,37 @@ export async function ensureStaffIdentity({ metaUserId, name, pages = [] }) {
   });
 }
 
+export async function bootstrapExistingStaffAdministrator() {
+  await ensureTenantSchema();
+  const sql = getSql();
+  const administrators = await sql`
+    SELECT meta_user_id
+    FROM dilg_staff_users
+    WHERE global_role = 'regional_admin' AND status = 'approved'
+    LIMIT 1
+  `;
+  if (administrators.length) return administrators[0];
+  const sessions = await sql`
+    SELECT session_hash, meta_user_id, user_name
+    FROM dilg_facebook_sessions
+    WHERE expires_at > NOW()
+    ORDER BY created_at ASC
+    LIMIT 1
+  `;
+  if (!sessions.length) return null;
+  const pages = await sql`
+    SELECT page_id, page_name
+    FROM dilg_facebook_pages
+    WHERE session_hash = ${sessions[0].session_hash}
+    ORDER BY page_name ASC
+  `;
+  return ensureStaffIdentity({
+    metaUserId: sessions[0].meta_user_id,
+    name: sessions[0].user_name,
+    pages: pages.map((page) => ({ id: page.page_id, name: page.page_name })),
+  });
+}
+
 export async function getStaffContext(metaUserId) {
   await ensureTenantSchema();
   const sql = getSql();

@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { canRolePublish, ensureStaffIdentity, ensureTenantSchema, getStaffContext } from "@/lib/access-control";
+import { bootstrapExistingStaffAdministrator, canRolePublish, ensureStaffIdentity, ensureTenantSchema, getStaffContext } from "@/lib/access-control";
 import { getDatabaseReadiness, getSql } from "@/lib/database";
 import { FacebookApiError } from "@/lib/facebook-server";
 
@@ -275,6 +275,7 @@ async function ensureSchema() {
       `;
       await sql`CREATE INDEX IF NOT EXISTS dilg_facebook_pages_session_idx ON dilg_facebook_pages(session_hash)`;
       await ensureTenantSchema();
+      await bootstrapExistingStaffAdministrator();
     })().catch((error) => {
       schemaPromise = null;
       throw new FacebookApiError("The Facebook connection database could not be initialized.", 503, { cause: error?.code || "database_error" });
