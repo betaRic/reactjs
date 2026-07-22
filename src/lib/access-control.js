@@ -252,6 +252,7 @@ export async function getAdminDirectory(actorMetaUserId) {
     `,
   ]);
   return {
+    currentMetaUserId: actorMetaUserId,
     offices: offices.map(mapOffice),
     users: users.map((user) => ({
       metaUserId: user.meta_user_id,

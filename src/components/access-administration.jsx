@@ -112,6 +112,7 @@ export default function AccessAdministration({ compact = false, onAccessChanged 
                     key={user.metaUserId}
                     user={user}
                     offices={directory.offices}
+                    currentMetaUserId={directory.currentMetaUserId}
                     busy={busy}
                     perform={perform}
                   />
@@ -160,7 +161,7 @@ export default function AccessAdministration({ compact = false, onAccessChanged 
   );
 }
 
-function StaffAccessCard({ user, offices, busy, perform }) {
+function StaffAccessCard({ user, offices, currentMetaUserId, busy, perform }) {
   const activeOffices = offices.filter((office) => office.active);
   const unassignedOffice = activeOffices.find((office) => !user.memberships.some((membership) => membership.officeId === office.id && membership.active));
   const [assignment, setAssignment] = useState({
@@ -224,7 +225,11 @@ function StaffAccessCard({ user, offices, busy, perform }) {
 
       <div className="staff-security-actions">
         {user.status === "approved" ? <button type="button" className="danger-link" onClick={() => perform("set_staff_status", { metaUserId: user.metaUserId, status: "suspended" }, "Staff account suspended.")} disabled={isBusy}>Suspend access</button> : user.status === "suspended" ? <button type="button" onClick={() => perform("set_staff_status", { metaUserId: user.metaUserId, status: "approved" }, "Staff account restored.")} disabled={isBusy}>Restore access</button> : null}
-        {user.globalRole === "regional_admin" ? <span><ShieldCheck size={14} /> Regional administrator</span> : <button type="button" onClick={() => perform("set_global_role", { metaUserId: user.metaUserId, globalRole: "regional_admin" }, "Regional Administrator access granted.")} disabled={isBusy}>Make Regional Admin</button>}
+        {user.globalRole === "regional_admin"
+          ? user.metaUserId === currentMetaUserId
+            ? <span><ShieldCheck size={14} /> Your Regional Administrator account</span>
+            : <button type="button" className="danger-link" onClick={() => perform("set_global_role", { metaUserId: user.metaUserId, globalRole: "staff" }, "Regional Administrator access removed.")} disabled={isBusy}>Remove Regional Admin</button>
+          : <button type="button" onClick={() => perform("set_global_role", { metaUserId: user.metaUserId, globalRole: "regional_admin" }, "Regional Administrator access granted.")} disabled={isBusy}>Make Regional Admin</button>}
       </div>
     </article>
   );
