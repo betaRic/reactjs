@@ -8,9 +8,9 @@ A separate Next.js rebuild of the NAS5 Facebook Poster workflow for DILG offices
 - Node.js runtime for Next.js and the health endpoint
 - Tailwind CSS 4 plus a custom responsive design system
 - Motion for page and composer transitions
-- Browser local storage partitioned by signed-in account and Facebook Page
+- Browser local storage partitioned by approved staff identity and assigned office Page
 - Vercel Blob direct uploads for campaign videos
-- Secure Meta OAuth with selectable Facebook Pages
+- Secure Meta OAuth plus Regional Administrator staff approval and office roles
 - Encrypted Page-token storage in Vercel Marketplace Postgres
 - Vercel-ready project structure
 
@@ -40,28 +40,32 @@ The current production URL is `https://socialmedia-dilg12.vercel.app/`.
 
 This is the recommended setup for Province, City, and Regional Office Pages. Each authorized staff member connects their Facebook account, sees the Pages they are allowed to manage, and selects the current publishing Page in **Settings → Facebook Pages**.
 
-The four connection variables configure one shared Region XII integration, not one Page. `FACEBOOK_APP_ID` and `FACEBOOK_APP_SECRET` identify the Meta app; `FACEBOOK_TOKEN_ENCRYPTION_KEY` protects stored Page tokens; and `DATABASE_URL` stores separate encrypted connections. Do not create Page-specific environment variables. After the administrator completes this setup once, each office uses the in-app Facebook login and can access only Pages its staff account is permitted to manage.
+The connection variables configure one shared Region XII integration, not one Page. `FACEBOOK_APP_ID` and `FACEBOOK_APP_SECRET` identify the Meta app; `FACEBOOK_TOKEN_ENCRYPTION_KEY` protects stored Page tokens; and the Neon pooled database URL stores separate encrypted connections, staff approvals, offices, roles, and an access audit. Do not create Page-specific environment variables. After Meta verifies a staff account, a Regional Administrator must still approve it and bind it to an office before the studio becomes available.
 
 1. Create or configure a Meta app with Facebook Login and the permissions `pages_show_list`, `pages_manage_posts`, and `pages_read_engagement`.
 2. Add this exact production redirect URI in the Meta app: `https://socialmedia-dilg12.vercel.app/api/facebook/oauth/callback`.
-3. In Vercel Marketplace, connect a Postgres provider to the project so Vercel supplies `DATABASE_URL`.
+3. In Vercel Marketplace, connect Neon so Vercel supplies `POSTGRES_URL` or `DATABASE_URL`. The application accepts either pooled variable.
 4. Add the variables below in **Vercel → Project Settings → Environment Variables**, then redeploy.
 
 ```text
 FACEBOOK_APP_ID
 FACEBOOK_APP_SECRET
 FACEBOOK_TOKEN_ENCRYPTION_KEY
-DATABASE_URL
+DATABASE_URL or POSTGRES_URL
 FACEBOOK_GRAPH_API_VERSION=v25.0
-BLOB_READ_WRITE_TOKEN
+BLOB_STORE_ID or BLOB_READ_WRITE_TOKEN
 NEXT_PUBLIC_SITE_URL=https://socialmedia-dilg12.vercel.app
 ```
 
 Generate `FACEBOOK_TOKEN_ENCRYPTION_KEY` as a long random secret and never paste it into browser settings. Page access tokens are encrypted with AES-256-GCM before they are stored. The browser receives only Page names, IDs, pictures, and an opaque HttpOnly session cookie. The app creates its two database tables automatically; [the equivalent SQL schema](./db/facebook-connections.sql) is included for administrators and audits.
 
-Meta may require App Review and Business Verification before people outside the app’s assigned roles can grant these permissions. A person can publish only to Pages their Facebook account is authorized to manage. Personal-profile posting is not supported by this Page integration.
+Meta may require App Review and Business Verification before people outside the app’s assigned roles can grant these permissions. A person can publish only when both Meta and the server-side Region XII staff directory authorize the same Page. Personal-profile posting is not supported by this Page integration.
 
-Facebook sign-in is the application account system. Each browser receives an opaque HttpOnly account session. The active Page is kept per browser tab and is included in every media, Feed, video, Story, and connection-test request. The server verifies that the requested Page belongs to that session before using its encrypted token, so another user or tab cannot redirect a post by changing a shared server setting. The legacy single-Page token and publishing-key path has been removed.
+Facebook establishes a stable staff identity and proves which Pages that identity can manage. New identities remain pending until a Regional Administrator assigns an office and one of the roles `office_admin`, `publisher`, `editor`, or `viewer`. The first existing connected identity bootstraps the Regional Administrator during the one-time migration so the deployment cannot lock out its owner. Every media, Feed, video, Story, and connection-test request verifies the signed-in session, approved staff status, active office membership, role, and office-to-Page binding before a Page token can be decrypted. The legacy single-Page token and publishing-key path has been removed.
+
+### Staff approval and office privacy
+
+Open **Settings → Staff and office administration** as a Regional Administrator. A newly signed-in employee appears as **Pending** with the Facebook Pages Meta verified for that identity. Select the official office, role, and matching Page, then approve the account. Employees cannot approve themselves, choose an unassigned office, or publish through a Page that is not bound to their membership. If one employee has duties in more than one office, each additional assignment must be added explicitly by a Regional Administrator. All access changes are written to `dilg_access_audit`.
 
 The secure server workflow prepares the selected template on every photo, uploads each photo as unpublished media, then creates one multi-photo Page feed post. A photo My Day/Story uses the first campaign photo in a generated 1080 × 1920 layout. Video campaigns use one MP4, MOV, or WebM file and can publish to the Page Feed, My Day, or both.
 
@@ -73,7 +77,7 @@ Photo campaigns can also enable a shared event-information banner. The event tit
 
 ### Enable video uploads
 
-In Vercel, open **Storage**, create a **Blob** store, choose **Public**, and connect it to this project. Vercel adds `BLOB_READ_WRITE_TOKEN` to the project automatically; redeploy after connecting the store. Videos upload directly from the browser to Blob instead of passing through a Vercel Function, so files up to the composer’s 500 MB limit are supported.
+In Vercel, open **Storage**, create a **Blob** store, choose **Public**, and connect it to this project for Production and Preview. Current Vercel projects use OIDC and expose `BLOB_STORE_ID`; older stores may expose `BLOB_READ_WRITE_TOKEN`. The application accepts both. Redeploy after connecting the store. Videos upload directly from the browser to Blob instead of passing through a Vercel Function, so files up to the composer’s 500 MB limit are supported.
 
 Public Blob storage is intentional: Meta must be able to fetch the video URL during publishing. The Blob token remains server-only. The composer accepts one video per campaign, and a My Day video must be 60 seconds or shorter.
 

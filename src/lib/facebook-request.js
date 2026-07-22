@@ -3,19 +3,19 @@ import "server-only";
 import { getFacebookOAuthReadiness, getSelectedOAuthFacebookConfig } from "@/lib/facebook-connections";
 import { FacebookApiError } from "@/lib/facebook-server";
 
-export async function resolveFacebookConfig(request, { allowMissing = false, pageId = "" } = {}) {
+export async function resolveFacebookConfig(request, { allowMissing = false, pageId = "", requirePublish = true } = {}) {
   const oauthReadiness = getFacebookOAuthReadiness();
   if (!oauthReadiness.available) {
     if (allowMissing) return { configured: false, missing: oauthReadiness.missing, mode: "unconfigured", oauthAvailable: false, connectionRequired: false };
     throw new FacebookApiError("Facebook account access is not configured on this deployment.", 503, { missing: oauthReadiness.missing });
   }
 
-  const oauthConfig = await getSelectedOAuthFacebookConfig(request, pageId);
+  const oauthConfig = await getSelectedOAuthFacebookConfig(request, pageId, { requirePublish });
   if (oauthConfig) return { ...oauthConfig, oauthAvailable: true, connectionRequired: false };
   if (allowMissing) {
     return { configured: false, missing: [], mode: "account", oauthAvailable: true, connectionRequired: true };
   }
-  throw new FacebookApiError("Sign in with Facebook and choose a Page before publishing.", 401);
+  throw new FacebookApiError("Sign in with Facebook and wait for an approved office assignment before publishing.", 401);
 }
 
 export async function authorizeMediaUpload(request, pageId) {

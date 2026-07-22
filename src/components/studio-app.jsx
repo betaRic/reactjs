@@ -56,6 +56,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { clsx } from "clsx";
+import AccessAdministration from "@/components/access-administration";
 import {
   createId,
   formatRelativeDate,
@@ -77,7 +78,7 @@ const navigation = [
 
 const campaignFilters = ["All", "Draft", "Ready for review", "Scheduled", "Published"];
 const PAGE_SELECTION_STORAGE = "dilg-social-studio:selected-page";
-const EMPTY_FACEBOOK_DIRECTORY = { loading: true, available: false, connected: false, missing: [], pages: [], selectedPageId: "", accountKey: "", user: null };
+const EMPTY_FACEBOOK_DIRECTORY = { loading: true, available: false, connected: false, authenticated: false, missing: [], pages: [], selectedPageId: "", accountKey: "", user: null, staff: null, accessStatus: "" };
 const DEFAULT_PHOTO_EDIT = { zoom: 1, positionX: 50, positionY: 50, rotation: 0 };
 const DEFAULT_EVENT_OVERLAY = { enabled: false, title: "", date: "", location: "", position: "bottom-left", positionX: 0, positionY: 100 };
 const browserImageCache = new Map();
@@ -125,7 +126,7 @@ export default function StudioApp() {
   }, []);
 
   useEffect(() => {
-    if (facebookDirectory.loading || !facebookDirectory.connected || !facebookDirectory.selectedPageId) {
+    if (facebookDirectory.loading || !facebookDirectory.connected || facebookDirectory.accessStatus !== "approved" || !facebookDirectory.selectedPageId) {
       studioScopeRef.current = "";
       setStudio(null);
       return;
@@ -135,7 +136,7 @@ export default function StudioApp() {
     studioScopeRef.current = nextScope;
     setComposerOpen(false);
     setStudio(structuredClone(loadStudioState(nextScope)));
-  }, [facebookDirectory.loading, facebookDirectory.connected, facebookDirectory.accountKey, facebookDirectory.selectedPageId]);
+  }, [facebookDirectory.loading, facebookDirectory.connected, facebookDirectory.accessStatus, facebookDirectory.accountKey, facebookDirectory.selectedPageId]);
 
   useEffect(() => {
     if (!studio || !studioScopeRef.current) return;
@@ -225,6 +226,11 @@ export default function StudioApp() {
   }
 
   async function publishCampaign() {
+    const activePage = facebookDirectory.pages.find((page) => page.id === facebookDirectory.selectedPageId);
+    if (!activePage?.canPublish) {
+      toast.error("Your assigned office role does not allow Facebook publishing.");
+      return;
+    }
     if (!draft.title.trim() || draft.images.length === 0) {
       toast.error("Add a title and at least one photo or video before publishing.");
       return;
@@ -373,6 +379,7 @@ export default function StudioApp() {
   if (facebookDirectory.loading) return <LoadingScreen />;
   if (!facebookDirectory.available) return <AccountSetupScreen facebookDirectory={facebookDirectory} refreshFacebookDirectory={refreshFacebookDirectory} />;
   if (!facebookDirectory.connected) return <AccountSignInScreen />;
+  if (facebookDirectory.accessStatus !== "approved" || facebookDirectory.pages.length === 0) return <StaffAccessScreen facebookDirectory={facebookDirectory} refreshFacebookDirectory={refreshFacebookDirectory} />;
   if (!studio) return <LoadingScreen />;
 
   const selectedFacebookPage = facebookDirectory.pages.find((page) => page.id === facebookDirectory.selectedPageId) || facebookDirectory.pages[0] || null;
@@ -437,6 +444,7 @@ export default function StudioApp() {
             templates={studio.templates}
             settings={studio.settings}
             facebookPage={selectedFacebookPage}
+            canPublish={Boolean(selectedFacebookPage?.canPublish)}
             publishing={publishing}
             publishProgress={publishProgress}
             onClose={() => setComposerOpen(false)}
@@ -797,6 +805,7 @@ function SettingsView({ studio, setStudio, facebookDirectory, setFacebookDirecto
         </div>
       </section>
       <FacebookConnection facebookDirectory={facebookDirectory} setFacebookDirectory={setFacebookDirectory} refreshFacebookDirectory={refreshFacebookDirectory} />
+      {facebookDirectory.staff?.isRegionalAdmin && <AccessAdministration onAccessChanged={() => refreshFacebookDirectory().catch(() => {})} />}
       <section className="settings-section panel">
         <div className="settings-title"><div className="settings-glyph amber"><ShieldCheck size={20} /></div><div><h3>Publishing workflow</h3><p>Control the checks content passes before publishing.</p></div></div>
         <ToggleRow title="Require approval" text="Campaigns must be marked approved before publishing." checked={settings.approvalRequired} onChange={(value) => setSettings({ ...settings, approvalRequired: value })} />
@@ -854,32 +863,32 @@ function FacebookConnection({ facebookDirectory, setFacebookDirectory, refreshFa
   }
   return (
     <section className="settings-section panel facebook-connection-card">
-      <div className="settings-title"><div className="settings-glyph sky"><Wifi size={20} /></div><div><h3>Account and Facebook Pages</h3><p>Your account and Page workspace are isolated from every other signed-in user.</p></div>{facebookDirectory.connected && <span className="connection-badge connected"><CheckCircle2 size={15} /> Signed in</span>}</div>
+      <div className="settings-title"><div className="settings-glyph sky"><Wifi size={20} /></div><div><h3>Account and approved office</h3><p>Your office is assigned by a Regional Administrator and enforced again by the server on every publishing request.</p></div>{facebookDirectory.connected && <span className="connection-badge connected"><CheckCircle2 size={15} /> Approved</span>}</div>
 
       {facebookDirectory.loading ? (
         <div className="connection-loading"><Loader2 className="spin" size={19} /> Loading Facebook connection…</div>
       ) : facebookDirectory.available ? (
         facebookDirectory.connected ? (
           <div className="oauth-connected-layout">
-            <div className="connected-user"><BadgeCheck size={18} /><span>Signed in as <strong>{facebookDirectory.user?.name || "Facebook user"}</strong></span></div>
-            <div className="page-switcher">
-              <Field label="Publishing Page" hint={`${facebookDirectory.pages.length} available`}>
+            <div className="connected-user"><BadgeCheck size={18} /><span>Signed in as <strong>{facebookDirectory.user?.name || "Facebook user"}</strong> · {roleLabel(selectedPage?.role)}</span></div>
+            {facebookDirectory.pages.length > 1 ? <div className="page-switcher">
+              <Field label="Administrator-approved office" hint={`${facebookDirectory.pages.length} explicit assignments`}>
                 <select value={selectedPage?.id || ""} onChange={(event) => choosePage(event.target.value)} disabled={switching}>
-                  {facebookDirectory.pages.map((page) => <option key={page.id} value={page.id}>{page.name}</option>)}
+                  {facebookDirectory.pages.map((page) => <option key={page.id} value={page.id}>{page.officeName || page.name}</option>)}
                 </select>
               </Field>
               {switching && <Loader2 className="spin page-switcher-loader" size={18} />}
-            </div>
-            {selectedPage && <div className="connected-page"><div className="connected-page-avatar">{selectedPage.picture ? <img src={selectedPage.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>{selectedPage.name}</strong><span>Page ID {selectedPage.id} · isolated workspace for Feed and My Day publishing</span></div></div>}
+            </div> : selectedPage ? <div className="fixed-office-assignment"><ShieldCheck size={17} /><div><span>Assigned office</span><strong>{selectedPage.officeName || selectedPage.name}</strong></div><small>Only a Regional Administrator can change this assignment.</small></div> : null}
+            {selectedPage && <div className="connected-page"><div className="connected-page-avatar">{selectedPage.picture ? <img src={selectedPage.picture} alt="" /> : <MessageSquareText size={20} />}</div><div><strong>{selectedPage.name}</strong><span>Page ID {selectedPage.id} · {selectedPage.canPublish ? "publishing permitted" : "publishing restricted"} · server-verified office binding</span></div></div>}
             <div className="connection-actions">
               <button className="secondary-button" onClick={checkConnection} disabled={checking || switching}>{checking ? <Loader2 className="spin" size={17} /> : <Wifi size={17} />} Test selected Page</button>
-              <a className="secondary-button" href="/api/facebook/oauth/start"><RefreshCcw size={17} /> Refresh Pages</a>
+              <a className="secondary-button" href="/api/facebook/oauth/start"><RefreshCcw size={17} /> Refresh Facebook permissions</a>
               <button className="danger-button" onClick={disconnect} disabled={switching}><Trash2 size={17} /> Sign out</button>
             </div>
           </div>
         ) : (
           <div className="oauth-connection-hero">
-            <div><strong>Connect your authorized Facebook account</strong><p>The app will show only Pages your account can manage. You can switch between Province, City, and Regional Office Pages before publishing.</p></div>
+            <div><strong>Connect your authorized Facebook account</strong><p>Meta verifies Page access first. A Regional Administrator must then approve your identity and assign the exact office and role available in this application.</p></div>
             <a className="primary-button facebook-connect-button" href="/api/facebook/oauth/start"><ExternalLink size={17} /> Connect with Facebook</a>
           </div>
         )
@@ -963,7 +972,7 @@ function FacebookAdminSetup({ missing = [], onRefresh }) {
   );
 }
 
-function Composer({ draft, setDraft, templates, settings, facebookPage, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
+function Composer({ draft, setDraft, templates, settings, facebookPage, canPublish, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
   const fileRef = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -1152,7 +1161,7 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, onClose,
             <div className="preview-note"><ShieldCheck size={17} /><span>Live publishing uses the secure Meta connection configured in Vercel.</span></div>
           </aside>
         </div>
-        <footer className="composer-footer"><div className="composer-save-area"><button className="text-button" onClick={onSave} disabled={publishing}>Save draft</button>{publishing && <span className="publish-progress"><Loader2 className="spin" size={15} /> {publishProgress}</span>}</div><div><button className="secondary-button" onClick={onReview} disabled={publishing}><BadgeCheck size={17} /> Submit for review</button><button className="primary-button" onClick={onPublish} disabled={publishing}>{publishing ? <Loader2 className="spin" size={17} /> : <Send size={17} />} {publishing ? "Publishing…" : draft.scheduledFor ? "Schedule on Facebook" : "Publish to Facebook"}</button></div></footer>
+        <footer className="composer-footer"><div className="composer-save-area"><button className="text-button" onClick={onSave} disabled={publishing}>Save draft</button>{publishing && <span className="publish-progress"><Loader2 className="spin" size={15} /> {publishProgress}</span>}</div><div><button className="secondary-button" onClick={onReview} disabled={publishing}><BadgeCheck size={17} /> Submit for review</button><button className="primary-button" onClick={onPublish} disabled={publishing || !canPublish} title={canPublish ? "" : "Your office role does not allow publishing"}>{publishing ? <Loader2 className="spin" size={17} /> : <Send size={17} />} {publishing ? "Publishing…" : canPublish ? draft.scheduledFor ? "Schedule on Facebook" : "Publish to Facebook" : "Publishing restricted"}</button></div></footer>
       </motion.section>
       <AnimatePresence>
         {editingImage && <PhotoEditor media={editingImage} template={activeTemplate} eventOverlay={draft.eventOverlay} campaignTitle={draft.title} onChange={(edit) => updatePhotoEdit(editingImage.id, edit)} onClose={() => setEditingImageId(null)} />}
@@ -1529,14 +1538,59 @@ function AccountSignInScreen() {
         <div className="sign-in-seal"><img src="/brand/dilg-logo.png" alt="" /></div>
         <span className="section-kicker"><ShieldCheck size={14} /> Secure staff account</span>
         <h1>Sign in to your office workspace</h1>
-        <p>Use the Facebook account that has access to your official Province, City, or Regional Office Page.</p>
+        <p>Use the Facebook account that has access to your official Province, City, or Regional Office Page. New staff must then be approved by a Regional Administrator.</p>
         <div className="account-isolation-list">
           <span><CheckCircle2 size={17} /><strong>Your own account session</strong><small>Other users cannot change your selected Page.</small></span>
-          <span><CheckCircle2 size={17} /><strong>Authorized Pages only</strong><small>Meta decides which Pages your account can manage.</small></span>
-          <span><CheckCircle2 size={17} /><strong>Page-isolated workspace</strong><small>Campaigns and templates are separated by account and Page on this device.</small></span>
+          <span><CheckCircle2 size={17} /><strong>Administrator-assigned office</strong><small>You cannot select or approve your own office.</small></span>
+          <span><CheckCircle2 size={17} /><strong>Two authorization checks</strong><small>Meta Page access and the Region XII staff directory must both allow publishing.</small></span>
         </div>
         <a className="primary-button account-sign-in-button" href="/api/facebook/oauth/start"><ExternalLink size={18} /> Continue with Facebook</a>
         <small className="account-privacy-note"><KeyRound size={14} /> Page tokens remain encrypted on the server and never enter browser storage.</small>
+      </section>
+    </main>
+  );
+}
+
+function StaffAccessScreen({ facebookDirectory, refreshFacebookDirectory }) {
+  const [busy, setBusy] = useState(false);
+  const status = facebookDirectory.accessStatus || "pending";
+  const isAdministrator = Boolean(facebookDirectory.staff?.isRegionalAdmin);
+  const approvedWithoutOffice = status === "approved" && facebookDirectory.pages.length === 0;
+
+  async function signOut() {
+    setBusy(true);
+    try {
+      await requestJson("/api/facebook/connections", { method: "DELETE" });
+      window.location.reload();
+    } catch (error) {
+      toast.error(error.message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="account-access-shell staff-access-shell">
+      <Toaster richColors position="top-right" closeButton />
+      <div className="account-access-brand"><img src="/brand/dilg-logo.png" alt="DILG seal" /><div><strong>DILG Social Studio</strong><span>Region XII protected staff access</span></div></div>
+      <section className="account-access-card staff-access-gate">
+        <div className={`access-gate-icon ${status}`}><ShieldCheck size={28} /></div>
+        <span className="section-kicker"><BadgeCheck size={14} /> Signed in as {facebookDirectory.user?.name || "Facebook user"}</span>
+        <h1>{status === "suspended" ? "Your staff access is suspended" : approvedWithoutOffice ? "An office assignment is required" : "Your access request is awaiting approval"}</h1>
+        <p>{status === "suspended"
+          ? "A Regional Administrator has suspended this account. Facebook publishing and office workspaces remain blocked."
+          : approvedWithoutOffice
+            ? "Your identity is approved, but no verified Facebook Page and office membership are connected to this account yet."
+            : "A Regional Administrator must assign your official office and role. Until then, no campaigns, templates, or Facebook publishing tools are available."}</p>
+        <div className="account-isolation-list access-gate-checks">
+          <span><CheckCircle2 size={17} /><strong>Facebook identity verified</strong><small>The server recognized this Facebook account.</small></span>
+          <span><Clock3 size={17} /><strong>Office membership {status === "approved" ? "incomplete" : "pending"}</strong><small>Staff cannot approve or assign themselves.</small></span>
+          <span><ShieldCheck size={17} /><strong>Publishing remains blocked</strong><small>Every API request enforces the approved office assignment.</small></span>
+        </div>
+        <div className="access-gate-actions">
+          <button className="primary-button" onClick={() => refreshFacebookDirectory().catch(() => {})} disabled={busy}><RefreshCcw size={17} /> Check approval status</button>
+          <button className="secondary-button" onClick={signOut} disabled={busy}>{busy ? <Loader2 className="spin" size={17} /> : <Trash2 size={17} />} Sign out</button>
+        </div>
+        {isAdministrator && approvedWithoutOffice ? <AccessAdministration compact onAccessChanged={() => refreshFacebookDirectory().catch(() => {})} /> : null}
       </section>
     </main>
   );
@@ -1931,4 +1985,11 @@ function formatFileSize(bytes) {
 
 function destinationLabel(destination) {
   return destination === "story" ? "My Day" : "Facebook Feed";
+}
+
+function roleLabel(role) {
+  if (role === "office_admin") return "Office administrator";
+  if (role === "publisher") return "Publisher";
+  if (role === "editor") return "Editor";
+  return "Viewer";
 }

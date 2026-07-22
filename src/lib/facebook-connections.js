@@ -1,7 +1,8 @@
 import "server-only";
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import postgres from "postgres";
+import { canRolePublish, ensureStaffIdentity, ensureTenantSchema, getStaffContext } from "@/lib/access-control";
+import { getDatabaseReadiness, getSql } from "@/lib/database";
 import { FacebookApiError } from "@/lib/facebook-server";
 
 export const FACEBOOK_SESSION_COOKIE = "dilg_meta_session";
@@ -15,7 +16,7 @@ export function getFacebookOAuthReadiness() {
   if (!clean(process.env.FACEBOOK_APP_ID)) missing.push("FACEBOOK_APP_ID");
   if (!clean(process.env.FACEBOOK_APP_SECRET)) missing.push("FACEBOOK_APP_SECRET");
   if (!clean(process.env.FACEBOOK_TOKEN_ENCRYPTION_KEY)) missing.push("FACEBOOK_TOKEN_ENCRYPTION_KEY");
-  if (!clean(process.env.DATABASE_URL)) missing.push("DATABASE_URL");
+  missing.push(...getDatabaseReadiness().missing);
   return { available: missing.length === 0, missing };
 }
 
@@ -71,29 +72,55 @@ export async function getFacebookConnections(request) {
     LIMIT 1
   `;
   if (!sessions.length) return { available: true, connected: false, missing: [], pages: [], selectedPageId: "" };
-  const pages = await sql`
+  const connectedPages = await sql`
     SELECT page_id, page_name, picture_url, tasks
     FROM dilg_facebook_pages
     WHERE session_hash = ${sessionHash}
     ORDER BY page_name ASC
   `;
+  await ensureStaffIdentity({
+    metaUserId: sessions[0].meta_user_id,
+    name: sessions[0].user_name,
+    pages: connectedPages.map((page) => ({ id: page.page_id, name: page.page_name })),
+  });
+  const staff = await getStaffContext(sessions[0].meta_user_id);
+  const membershipByPage = new Map(
+    (staff?.status === "approved" ? staff.memberships : [])
+      .filter((membership) => membership.pageId)
+      .map((membership) => [membership.pageId, membership]),
+  );
+  const pages = connectedPages.filter((page) => membershipByPage.has(page.page_id));
+  const selectedPageId = [sessions[0].selected_page_id, pages[0]?.page_id]
+    .find((pageId) => pageId && pages.some((page) => page.page_id === pageId)) || "";
   return {
     available: true,
-    connected: pages.length > 0,
+    connected: true,
+    authenticated: true,
     missing: [],
     accountKey: createHash("sha256").update(`facebook-account:${sessions[0].meta_user_id}`).digest("hex").slice(0, 24),
     user: { name: sessions[0].user_name || "Facebook user" },
-    selectedPageId: sessions[0].selected_page_id || pages[0]?.page_id || "",
+    staff: staff ? {
+      status: staff.status,
+      globalRole: staff.globalRole,
+      isRegionalAdmin: staff.isRegionalAdmin,
+      memberships: staff.memberships,
+    } : { status: "pending", globalRole: "staff", isRegionalAdmin: false, memberships: [] },
+    accessStatus: staff?.status || "pending",
+    selectedPageId,
     pages: pages.map((page) => ({
       id: page.page_id,
       name: page.page_name,
       picture: page.picture_url || "",
       tasks: Array.isArray(page.tasks) ? page.tasks : [],
+      officeId: membershipByPage.get(page.page_id)?.officeId || "",
+      officeName: membershipByPage.get(page.page_id)?.officeName || page.page_name,
+      role: membershipByPage.get(page.page_id)?.role || "viewer",
+      canPublish: Boolean(membershipByPage.get(page.page_id)?.canPublish),
     })),
   };
 }
 
-export async function getSelectedOAuthFacebookConfig(request, pageId = "") {
+export async function getSelectedOAuthFacebookConfig(request, pageId = "", { requirePublish = true } = {}) {
   const readiness = getFacebookOAuthReadiness();
   if (!readiness.available) return null;
   const sessionId = validSessionId(readRequestCookie(request, FACEBOOK_SESSION_COOKIE));
@@ -103,23 +130,40 @@ export async function getSelectedOAuthFacebookConfig(request, pageId = "") {
   const sessionHash = hashSession(sessionId);
   const requestedPageId = clean(pageId || request.headers.get("x-facebook-page-id"));
   const rows = await sql`
-    SELECT p.page_id, p.page_name, p.page_token, p.picture_url
+    SELECT p.page_id, p.page_name, p.page_token, p.picture_url, m.role, o.id AS office_id, o.name AS office_name
     FROM dilg_facebook_sessions s
+    JOIN dilg_staff_users u
+      ON u.meta_user_id = s.meta_user_id
+      AND u.status = 'approved'
+    JOIN dilg_office_memberships m
+      ON m.meta_user_id = s.meta_user_id
+      AND m.active = TRUE
+    JOIN dilg_offices o
+      ON o.id = m.office_id
+      AND o.active = TRUE
     JOIN dilg_facebook_pages p
       ON p.session_hash = s.session_hash
-      AND p.page_id = COALESCE(NULLIF(${requestedPageId}, ''), s.selected_page_id, p.page_id)
+      AND p.page_id = o.facebook_page_id
+      AND (${requestedPageId} = '' OR p.page_id = ${requestedPageId})
     WHERE s.session_hash = ${sessionHash} AND s.expires_at > NOW()
     ORDER BY CASE WHEN p.page_id = s.selected_page_id THEN 0 ELSE 1 END, p.page_name ASC
     LIMIT 1
   `;
-  if (!rows.length && requestedPageId) throw new FacebookApiError("That Facebook Page is not available to this account.", 403);
+  if (!rows.length && requestedPageId) throw new FacebookApiError("That Facebook Page is not available to this approved office account.", 403);
   if (!rows.length) return null;
+  if (requirePublish && !canRolePublish(rows[0].role)) {
+    throw new FacebookApiError("Your assigned office role does not allow Facebook publishing.", 403);
+  }
   return {
     configured: true,
     mode: "account",
     pageId: rows[0].page_id,
     pageName: rows[0].page_name,
     pagePicture: rows[0].picture_url || "",
+    officeId: rows[0].office_id,
+    officeName: rows[0].office_name,
+    officeRole: rows[0].role,
+    canPublish: canRolePublish(rows[0].role),
     accessToken: decryptToken(rows[0].page_token),
     graphVersion: clean(process.env.FACEBOOK_GRAPH_API_VERSION) || "v25.0",
     missing: [],
@@ -155,7 +199,39 @@ export async function saveFacebookConnections({ sessionId, user, pages }) {
       `;
     }
   });
+  await ensureStaffIdentity({ metaUserId: user.id, name: user.name, pages: validPages });
   return { selectedPageId };
+}
+
+export async function getFacebookSessionIdentity(request) {
+  const sessionId = validSessionId(readRequestCookie(request, FACEBOOK_SESSION_COOKIE));
+  if (!sessionId || !getFacebookOAuthReadiness().available) return null;
+  await ensureSchema();
+  const sql = getSql();
+  const sessionHash = hashSession(sessionId);
+  const sessions = await sql`
+    SELECT meta_user_id, user_name, expires_at
+    FROM dilg_facebook_sessions
+    WHERE session_hash = ${sessionHash} AND expires_at > NOW()
+    LIMIT 1
+  `;
+  if (!sessions.length) return null;
+  const connectedPages = await sql`
+    SELECT page_id, page_name
+    FROM dilg_facebook_pages
+    WHERE session_hash = ${sessionHash}
+  `;
+  await ensureStaffIdentity({
+    metaUserId: sessions[0].meta_user_id,
+    name: sessions[0].user_name,
+    pages: connectedPages.map((page) => ({ id: page.page_id, name: page.page_name })),
+  });
+  return {
+    metaUserId: sessions[0].meta_user_id,
+    name: sessions[0].user_name,
+    expiresAt: sessions[0].expires_at,
+    sessionHash,
+  };
 }
 
 export async function deleteFacebookConnection(request) {
@@ -163,15 +239,6 @@ export async function deleteFacebookConnection(request) {
   if (!sessionId || !getFacebookOAuthReadiness().available) return;
   await ensureSchema();
   await getSql()`DELETE FROM dilg_facebook_sessions WHERE session_hash = ${hashSession(sessionId)}`;
-}
-
-function getSql() {
-  const connectionString = clean(process.env.DATABASE_URL);
-  if (!connectionString) throw new FacebookApiError("The Facebook connection database is not configured.", 503);
-  if (!globalThis.__dilgFacebookSql) {
-    globalThis.__dilgFacebookSql = postgres(connectionString, { max: 1, prepare: false, connect_timeout: 10, idle_timeout: 20 });
-  }
-  return globalThis.__dilgFacebookSql;
 }
 
 async function pruneExpiredSessions(sql) {
@@ -207,6 +274,7 @@ async function ensureSchema() {
         )
       `;
       await sql`CREATE INDEX IF NOT EXISTS dilg_facebook_pages_session_idx ON dilg_facebook_pages(session_hash)`;
+      await ensureTenantSchema();
     })().catch((error) => {
       schemaPromise = null;
       throw new FacebookApiError("The Facebook connection database could not be initialized.", 503, { cause: error?.code || "database_error" });

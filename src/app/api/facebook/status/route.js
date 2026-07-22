@@ -1,16 +1,18 @@
 import { getFacebookOAuthReadiness } from "@/lib/facebook-connections";
 import { resolveFacebookConfig } from "@/lib/facebook-request";
 import { getPageIdentity, toRouteError } from "@/lib/facebook-server";
+import { getBlobStorageReadiness } from "@/lib/blob-storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request) {
   try {
-    const config = await resolveFacebookConfig(request, { allowMissing: true });
+    const videoStorage = getBlobStorageReadiness();
+    const config = await resolveFacebookConfig(request, { allowMissing: true, requirePublish: false });
     if (!config.configured) {
       const oauth = getFacebookOAuthReadiness();
-      return Response.json({ ok: true, configured: false, missing: config.missing, oauthAvailable: oauth.available, oauthMissing: oauth.missing, connectionRequired: config.connectionRequired, videoStorageConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN) });
+      return Response.json({ ok: true, configured: false, missing: config.missing, oauthAvailable: oauth.available, oauthMissing: oauth.missing, connectionRequired: config.connectionRequired, videoStorageConfigured: videoStorage.configured, videoStorageMode: videoStorage.mode });
     }
     const page = await getPageIdentity(config);
     return Response.json({
@@ -20,7 +22,8 @@ export async function GET(request) {
       mode: config.mode,
       oauthAvailable: config.oauthAvailable,
       graphVersion: config.graphVersion,
-      videoStorageConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN),
+      videoStorageConfigured: videoStorage.configured,
+      videoStorageMode: videoStorage.mode,
       page: {
         id: page.id,
         name: page.name,
