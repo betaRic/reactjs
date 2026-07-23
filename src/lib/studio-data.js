@@ -22,6 +22,9 @@ export const INITIAL_STATE = {
     {
       id: "template-feed",
       name: "Gensan Feed",
+      kind: "photo",
+      width: 940,
+      height: 788,
       size: "940 × 788",
       ratio: "4:3",
       image: "/templates/gensan-feed.png",
@@ -31,6 +34,9 @@ export const INITIAL_STATE = {
     {
       id: "template-landscape",
       name: "Facebook Landscape",
+      kind: "photo",
+      width: 1200,
+      height: 630,
       size: "1200 × 630",
       ratio: "1.91:1",
       image: "/templates/gensan-landscape.png",
@@ -40,6 +46,9 @@ export const INITIAL_STATE = {
     {
       id: "template-wide",
       name: "Event Wide",
+      kind: "photo",
+      width: 1920,
+      height: 1080,
       size: "1920 × 1080",
       ratio: "16:9",
       image: "/templates/gensan-wide.png",
@@ -142,9 +151,21 @@ export function saveStudioState(state, scope = "") {
   window.localStorage.setItem(getScopedStorageKey(scope), JSON.stringify(state));
 }
 
-function getScopedStorageKey(scope) {
+export function getScopedStorageKey(scope) {
   const safeScope = String(scope || "").replace(/[^A-Za-z0-9:_-]/g, "").slice(0, 96);
   return safeScope ? `${STORAGE_KEY}:${safeScope}` : STORAGE_KEY;
+}
+
+export function hasSavedStudioState(scope = "") {
+  if (typeof window === "undefined") return false;
+  try {
+    const value = window.localStorage.getItem(getScopedStorageKey(scope));
+    if (!value) return false;
+    const parsed = JSON.parse(value);
+    return Boolean(parsed?.campaigns?.length || parsed?.templates?.length);
+  } catch {
+    return false;
+  }
 }
 
 export function createId(prefix) {

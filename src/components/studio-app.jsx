@@ -57,9 +57,25 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { clsx } from "clsx";
 import AccessAdministration from "@/components/access-administration";
+import CompositionEditor from "@/components/composition-editor";
+import {
+  createTextLayer,
+  DEFAULT_COVER,
+  DEFAULT_EVENT_FIELDS,
+  duotonePalette,
+  facebookLayout,
+  feedMedia,
+  isSquareTemplate,
+  layerAppliesTo,
+  normalizeCampaignComposition,
+  normalizeCover,
+  resolveCoverMedia,
+  resolveLayerText,
+} from "@/lib/composition";
 import {
   createId,
   formatRelativeDate,
+  hasSavedStudioState,
   INITIAL_STATE,
   loadStudioState,
   saveStudioState,
@@ -80,7 +96,6 @@ const campaignFilters = ["All", "Draft", "Ready for review", "Scheduled", "Publi
 const PAGE_SELECTION_STORAGE = "dilg-social-studio:selected-page";
 const EMPTY_FACEBOOK_DIRECTORY = { loading: true, available: false, connected: false, authenticated: false, missing: [], pages: [], selectedPageId: "", accountKey: "", user: null, staff: null, accessStatus: "" };
 const DEFAULT_PHOTO_EDIT = { zoom: 1, positionX: 50, positionY: 50, rotation: 0 };
-const DEFAULT_EVENT_OVERLAY = { enabled: false, title: "", date: "", location: "", position: "bottom-left", positionX: 0, positionY: 100 };
 const browserImageCache = new Map();
 const rotatedImageCache = new WeakMap();
 
@@ -92,7 +107,11 @@ const emptyDraft = (templateId = "template-feed") => ({
   templateId,
   scheduledFor: "",
   destinations: ["feed", "story"],
-  eventOverlay: { ...DEFAULT_EVENT_OVERLAY },
+  cover: { ...DEFAULT_COVER },
+  eventFields: { ...DEFAULT_EVENT_FIELDS },
+  textLayers: [],
+  storySourceId: "",
+  revision: 0,
   images: [],
 });
 
@@ -105,6 +124,7 @@ export default function StudioApp() {
   const [facebookDirectory, setFacebookDirectory] = useState(EMPTY_FACEBOOK_DIRECTORY);
   const [publishing, setPublishing] = useState(false);
   const [publishProgress, setPublishProgress] = useState("");
+  const [workspaceAccess, setWorkspaceAccess] = useState({ canEdit: false, canManageTemplates: false, assetStorage: { available: false, missing: [] } });
   const studioScopeRef = useRef("");
 
   useEffect(() => {
@@ -135,29 +155,78 @@ export default function StudioApp() {
     if (studioScopeRef.current === nextScope) return;
     studioScopeRef.current = nextScope;
     setComposerOpen(false);
-    setStudio(structuredClone(loadStudioState(nextScope)));
+    const localStudio = structuredClone(loadStudioState(nextScope));
+    setStudio(localStudio);
+    const selectedPageId = facebookDirectory.selectedPageId;
+    requestJson("/api/workspace", { headers: { "x-facebook-page-id": selectedPageId } })
+      .then(async (workspace) => {
+        if (studioScopeRef.current !== nextScope) return;
+        setWorkspaceAccess({
+          ...workspace.office,
+          assetStorage: workspace.assetStorage || { available: false, missing: [] },
+        });
+        const hasRemoteData = workspace.campaigns?.length || workspace.templates?.length;
+        if (!hasRemoteData && hasSavedStudioState(nextScope) && window.confirm("A local workspace was found in this browser. Import its campaigns and templates into the shared office workspace now?")) {
+          try {
+            const migrated = await prepareLocalWorkspaceImport(localStudio, selectedPageId, workspace.office?.id);
+            await requestJson("/api/workspace", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedPageId },
+              body: JSON.stringify({ pageId: selectedPageId, ...migrated }),
+            });
+            const refreshed = await requestJson("/api/workspace", { headers: { "x-facebook-page-id": selectedPageId } });
+            if (studioScopeRef.current === nextScope) {
+              saveStudioState({
+                version: INITIAL_STATE.version,
+                settings: localStudio.settings,
+                templates: [],
+                campaigns: [],
+                activity: [],
+              }, nextScope);
+              setStudio((current) => ({
+                ...current,
+                templates: refreshed.templates,
+                campaigns: refreshed.campaigns,
+              }));
+              toast.success("Local campaigns and templates were copied into the shared office workspace.");
+            }
+            return;
+          } catch (error) {
+            toast.error(error.message || "The local workspace could not be imported.", { duration: 8000 });
+          }
+        }
+        setStudio((current) => ({
+          ...current,
+          templates: hasRemoteData ? workspace.templates : [],
+          campaigns: hasRemoteData ? workspace.campaigns : [],
+          settings: {
+            ...current.settings,
+            defaultTemplateId: workspace.templates?.some((item) => item.id === current.settings.defaultTemplateId)
+              ? current.settings.defaultTemplateId
+              : workspace.templates?.find((item) => item.kind !== "cover")?.id || "",
+          },
+        }));
+      })
+      .catch((error) => toast.error(error.message || "The shared office workspace could not be loaded.", { duration: 8000 }));
   }, [facebookDirectory.loading, facebookDirectory.connected, facebookDirectory.accessStatus, facebookDirectory.accountKey, facebookDirectory.selectedPageId]);
 
-  useEffect(() => {
-    if (!studio || !studioScopeRef.current) return;
-    try {
-      saveStudioState(studio, studioScopeRef.current);
-    } catch {
-      toast.error("This browser is out of local storage space. Remove a few large images and try again.");
-    }
-  }, [studio]);
-
   function openComposer(campaign) {
-    const templateId = studio?.settings.defaultTemplateId || studio?.templates[0]?.id;
+    if (!workspaceAccess?.canEdit) {
+      toast.info("Your Viewer role is read-only. Ask an office administrator to assign Editor access.");
+      return;
+    }
+    const photoTemplates = studio?.templates.filter((item) => item.kind !== "cover") || [];
+    const templateId = studio?.settings.defaultTemplateId || photoTemplates[0]?.id || "";
+    const composition = normalizeCampaignComposition(campaign || {});
     setDraft(
       campaign
         ? {
             ...campaign,
             destinations: campaign.destinations?.length ? campaign.destinations : ["feed", "story"],
-            eventOverlay: normalizeEventOverlay(campaign.eventOverlay),
+            ...composition,
             images: campaign.images.map((image) => ({ ...image, type: image.type || "image", edit: normalizePhotoEdit(image.edit) })),
           }
-        : emptyDraft(templateId),
+        : { ...emptyDraft(templateId), ...composition },
     );
     setComposerOpen(true);
   }
@@ -174,11 +243,11 @@ export default function StudioApp() {
     }
   }
 
-  function saveCampaign(nextStatus = draft.status || "Draft", extra = {}) {
+  async function saveCampaign(nextStatus = draft.status || "Draft", extra = {}) {
     const title = draft.title.trim();
     if (!title) {
       toast.error("Give this campaign a title first.");
-      return;
+      return null;
     }
     const now = new Date().toISOString();
     const id = draft.id || createId("campaign");
@@ -193,36 +262,89 @@ export default function StudioApp() {
       scheduledFor: draft.scheduledFor ? new Date(draft.scheduledFor).toISOString() : "",
     };
     const action = draft.id ? "updated" : "created";
-    setStudio((current) => ({
-      ...current,
-      campaigns: current.campaigns.some((item) => item.id === id)
-        ? current.campaigns.map((item) => (item.id === id ? campaign : item))
-        : [campaign, ...current.campaigns],
-      activity: [
-        {
-          id: createId("activity"),
-          type: nextStatus === "Published" ? "published" : nextStatus === "Scheduled" ? "scheduled" : "created",
-          text: `${title} was ${nextStatus === "Draft" ? action : nextStatus.toLowerCase()}`,
-          at: now,
-        },
-        ...current.activity,
-      ].slice(0, 80),
-    }));
-    setComposerOpen(false);
-    toast.success(
-      extra.facebookPostId || extra.facebookStoryId
-        ? nextStatus === "Scheduled" ? "Post scheduled on Facebook." : "Post published to Facebook."
-        : nextStatus === "Draft" ? "Draft saved to this device." : `Campaign marked ${nextStatus.toLowerCase()}.`,
-    );
+    const selectedPageId = facebookDirectory.selectedPageId;
+    try {
+      const response = await requestJson("/api/workspace/campaigns", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedPageId },
+        body: JSON.stringify({ pageId: selectedPageId, campaign }),
+      });
+      const savedCampaign = response.campaign;
+      setStudio((current) => ({
+        ...current,
+        campaigns: current.campaigns.some((item) => item.id === id)
+          ? current.campaigns.map((item) => (item.id === id ? savedCampaign : item))
+          : [savedCampaign, ...current.campaigns],
+        activity: [
+          {
+            id: createId("activity"),
+            type: nextStatus === "Published" ? "published" : nextStatus === "Scheduled" ? "scheduled" : "created",
+            text: `${title} was ${nextStatus === "Draft" ? action : nextStatus.toLowerCase()}`,
+            at: now,
+          },
+          ...current.activity,
+        ].slice(0, 80),
+      }));
+      setDraft((current) => ({ ...current, revision: savedCampaign.revision }));
+      setComposerOpen(false);
+      toast.success(
+        extra.facebookPostId || extra.facebookStoryId
+          ? nextStatus === "Scheduled" ? "Post scheduled on Facebook." : "Post published to Facebook."
+          : nextStatus === "Draft" ? "Draft saved to the shared office workspace." : `Campaign marked ${nextStatus.toLowerCase()}.`,
+      );
+      return savedCampaign;
+    } catch (error) {
+      if (error.status === 409) {
+        toast.error("Another staff member updated this campaign. Choose which version to keep.", {
+          duration: Infinity,
+          action: {
+            label: "Reload",
+            onClick: async () => {
+              try {
+                const workspace = await requestJson("/api/workspace", { headers: { "x-facebook-page-id": selectedPageId } });
+                const latest = workspace.campaigns.find((item) => item.id === campaign.id);
+                if (!latest) throw new Error("The latest campaign is no longer available.");
+                setStudio((current) => ({ ...current, templates: workspace.templates, campaigns: workspace.campaigns }));
+                setDraft({ ...emptyDraft(latest.templateId), ...latest, ...normalizeCampaignComposition(latest) });
+                toast.success("Latest shared version loaded.");
+              } catch (reloadError) {
+                toast.error(reloadError.message || "The latest version could not be loaded.");
+              }
+            },
+          },
+          cancel: {
+            label: "Save as copy",
+            onClick: async () => {
+              try {
+                const copy = copyCampaignWithNewIds(campaign, now);
+                const copied = await requestJson("/api/workspace/campaigns", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedPageId },
+                  body: JSON.stringify({ pageId: selectedPageId, campaign: copy }),
+                });
+                setStudio((current) => ({ ...current, campaigns: [copied.campaign, ...current.campaigns] }));
+                setComposerOpen(false);
+                toast.success("Your edits were saved as a separate campaign.");
+              } catch (copyError) {
+                toast.error(copyError.message || "The copy could not be saved.");
+              }
+            },
+          },
+        });
+      } else {
+        toast.error(error.message || "The campaign could not be saved.", { duration: 8000 });
+      }
+      return null;
+    }
   }
 
-  function submitForReview() {
+  async function submitForReview() {
     const destinations = draft.destinations?.length ? draft.destinations : [];
-    if (!draft.title.trim() || draft.images.length === 0 || (destinations.includes("feed") && !draft.caption.trim())) {
+    if (!draft.title.trim() || (!draft.images.length && !resolveCoverMedia(draft)) || (destinations.includes("feed") && !draft.caption.trim())) {
       toast.error(destinations.includes("feed") ? "Add a title, Feed caption, and media before review." : "Add a title and media before review.");
       return;
     }
-    saveCampaign("Ready for review");
+    await saveCampaign("Ready for review");
   }
 
   async function publishCampaign() {
@@ -231,13 +353,17 @@ export default function StudioApp() {
       toast.error("Your assigned office role does not allow Facebook publishing.");
       return;
     }
-    if (!draft.title.trim() || draft.images.length === 0) {
+    if (!draft.title.trim() || (!draft.images.length && !resolveCoverMedia(draft))) {
       toast.error("Add a title and at least one photo or video before publishing.");
       return;
     }
     const destinations = draft.destinations?.length ? draft.destinations : [];
     if (!destinations.length) {
       toast.error("Choose Facebook Feed, My Day, or both.");
+      return;
+    }
+    if (!draft.images.some((item) => item.type === "video") && feedMedia(draft).length > 8) {
+      toast.error("Facebook Feed supports eight attachments. Remove an event photo or disable the cover page.");
       return;
     }
     if (destinations.includes("feed") && !draft.caption.trim()) {
@@ -274,16 +400,28 @@ export default function StudioApp() {
         results.story = result.story;
         errors.push(...(result.errors || []));
       } else {
-        const template = studio.templates.find((item) => item.id === draft.templateId) || studio.templates[0];
+        const photoTemplate = studio.templates.find((item) => item.id === draft.templateId && (item.kind || "photo") === "photo") || null;
+        const coverTemplate = studio.templates.find((item) => item.id === draft.cover?.templateId && item.kind === "cover") || null;
+        const orderedMedia = feedMedia(draft).slice(0, 8);
         if (destinations.includes("feed")) {
           try {
             const mediaIds = [];
-            for (let index = 0; index < draft.images.length; index += 1) {
-              setPublishProgress(`Preparing Feed photo ${index + 1} of ${draft.images.length}`);
-              const photo = await renderTemplatedImage(draft.images[index], template?.image, draft.eventOverlay, draft.title);
+            for (let index = 0; index < orderedMedia.length; index += 1) {
+              const media = orderedMedia[index];
+              const isCover = media.compositionTarget === "cover";
+              const renderMedia = isCover ? { ...media, edit: draft.cover?.edit || media.edit } : media;
+              setPublishProgress(`Preparing Feed photo ${index + 1} of ${orderedMedia.length}`);
+              const photo = await renderComposedImage(renderMedia, isCover ? coverTemplate?.image : photoTemplate?.image, {
+                layers: draft.textLayers,
+                campaignTitle: draft.title,
+                eventFields: draft.eventFields,
+                target: isCover ? "cover" : "photo",
+                photoId: media.id,
+                duotone: isCover ? draft.cover?.duotone : "none",
+              });
               const form = new FormData();
               form.set("photo", photo, `campaign-photo-${String(index + 1).padStart(2, "0")}.jpg`);
-              setPublishProgress(`Uploading Feed photo ${index + 1} of ${draft.images.length}`);
+              setPublishProgress(`Uploading Feed photo ${index + 1} of ${orderedMedia.length}`);
               const uploaded = await requestJson("/api/facebook/media", {
                 method: "POST",
                 headers: { "x-facebook-page-id": selectedFacebookPage?.id || "" },
@@ -308,7 +446,19 @@ export default function StudioApp() {
         if (destinations.includes("story")) {
           try {
             setPublishProgress("Preparing Facebook My Day");
-            const storyPhoto = await renderStoryImage(draft.images[0], template?.image, draft.eventOverlay, draft.title);
+            const selectedStoryId = draft.storySourceId || (draft.cover?.enabled ? "cover" : draft.images[0]?.id);
+            const isCover = selectedStoryId === "cover";
+            const sourceMedia = isCover ? resolveCoverMedia(draft) : draft.images.find((item) => item.id === selectedStoryId) || draft.images[0];
+            if (!sourceMedia) throw new Error("Choose a My Day source image.");
+            const storyMedia = isCover ? { ...sourceMedia, edit: draft.cover?.edit || sourceMedia.edit } : sourceMedia;
+            const storyPhoto = await renderStoryImage(storyMedia, isCover ? coverTemplate?.image : photoTemplate?.image, {
+              layers: draft.textLayers,
+              campaignTitle: draft.title,
+              eventFields: draft.eventFields,
+              target: isCover ? "cover" : "photo",
+              photoId: sourceMedia.id,
+              duotone: isCover ? draft.cover?.duotone : "none",
+            });
             const form = new FormData();
             form.set("photo", storyPhoto, "campaign-story.jpg");
             setPublishProgress("Publishing Facebook My Day");
@@ -326,7 +476,7 @@ export default function StudioApp() {
         throw new Error(errors.map((item) => `${destinationLabel(item.destination)}: ${item.message}`).join(" · ") || "Facebook publishing failed.");
       }
       const scheduled = Boolean(results.feed?.scheduled) && !results.story;
-      saveCampaign(scheduled ? "Scheduled" : "Published", {
+      await saveCampaign(scheduled ? "Scheduled" : "Published", {
         facebookPostId: results.feed?.postId || "",
         facebookPermalink: results.feed?.permalink || "",
         facebookStoryId: results.story?.storyId || "",
@@ -343,37 +493,54 @@ export default function StudioApp() {
     }
   }
 
-  function updateCampaignStatus(campaignId, status) {
+  async function updateCampaignStatus(campaignId, status) {
     const campaign = studio.campaigns.find((item) => item.id === campaignId);
     if (!campaign) return;
     const now = new Date().toISOString();
-    setStudio((current) => ({
-      ...current,
-      campaigns: current.campaigns.map((item) =>
-        item.id === campaignId
-          ? { ...item, status, updatedAt: now, publishedAt: status === "Published" ? now : item.publishedAt }
-          : item,
-      ),
-      activity: [
-        { id: createId("activity"), type: status.toLowerCase(), text: `${campaign.title} was ${status.toLowerCase()}`, at: now },
-        ...current.activity,
-      ],
-    }));
-    toast.success(`${campaign.title} is now ${status.toLowerCase()}.`);
+    const updated = { ...campaign, status, updatedAt: now, publishedAt: status === "Published" ? now : campaign.publishedAt };
+    try {
+      const selectedPageId = facebookDirectory.selectedPageId;
+      const response = await requestJson("/api/workspace/campaigns", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedPageId },
+        body: JSON.stringify({ pageId: selectedPageId, campaign: updated }),
+      });
+      setStudio((current) => ({
+        ...current,
+        campaigns: current.campaigns.map((item) => item.id === campaignId ? response.campaign : item),
+        activity: [
+          { id: createId("activity"), type: status.toLowerCase(), text: `${campaign.title} was ${status.toLowerCase()}`, at: now },
+          ...current.activity,
+        ],
+      }));
+      toast.success(`${campaign.title} is now ${status.toLowerCase()}.`);
+    } catch (error) {
+      toast.error(error.message || "The campaign status could not be updated.");
+    }
   }
 
-  function deleteCampaign(campaignId) {
+  async function deleteCampaign(campaignId) {
     const campaign = studio.campaigns.find((item) => item.id === campaignId);
-    if (!campaign || !window.confirm(`Delete “${campaign.title}”? This only removes the local copy.`)) return;
-    setStudio((current) => ({
-      ...current,
-      campaigns: current.campaigns.filter((item) => item.id !== campaignId),
-      activity: [
-        { id: createId("activity"), type: "deleted", text: `${campaign.title} was deleted`, at: new Date().toISOString() },
-        ...current.activity,
-      ],
-    }));
-    toast.success("Campaign removed.");
+    if (!campaign || !window.confirm(`Delete “${campaign.title}” from this office workspace?`)) return;
+    try {
+      const selectedPageId = facebookDirectory.selectedPageId;
+      await requestJson("/api/workspace/campaigns", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedPageId },
+        body: JSON.stringify({ pageId: selectedPageId, campaignId }),
+      });
+      setStudio((current) => ({
+        ...current,
+        campaigns: current.campaigns.filter((item) => item.id !== campaignId),
+        activity: [
+          { id: createId("activity"), type: "deleted", text: `${campaign.title} was deleted`, at: new Date().toISOString() },
+          ...current.activity,
+        ],
+      }));
+      toast.success("Campaign removed from the shared workspace.");
+    } catch (error) {
+      toast.error(error.message || "The campaign could not be deleted.");
+    }
   }
 
   if (facebookDirectory.loading) return <LoadingScreen />;
@@ -388,6 +555,8 @@ export default function StudioApp() {
   const viewProps = {
     studio,
     setStudio,
+    workspaceAccess,
+    selectedPageId: facebookDirectory.selectedPageId,
     openComposer,
     setActiveView,
     updateCampaignStatus,
@@ -406,6 +575,7 @@ export default function StudioApp() {
         organization={activeOrganization}
         account={facebookDirectory.user}
         openComposer={() => openComposer()}
+        canEdit={workspaceAccess.canEdit}
         mobileMenuOpen={mobileMenuOpen}
         setMobileMenuOpen={setMobileMenuOpen}
       />
@@ -416,6 +586,7 @@ export default function StudioApp() {
           organization={activeOrganization}
           setMobileMenuOpen={setMobileMenuOpen}
           openComposer={() => openComposer()}
+          canEdit={workspaceAccess.canEdit}
         />
         <AnimatePresence mode="wait">
           <motion.div
@@ -444,6 +615,7 @@ export default function StudioApp() {
             templates={studio.templates}
             settings={studio.settings}
             facebookPage={selectedFacebookPage}
+            workspaceAccess={workspaceAccess}
             canPublish={Boolean(selectedFacebookPage?.canPublish)}
             publishing={publishing}
             publishProgress={publishProgress}
@@ -458,7 +630,7 @@ export default function StudioApp() {
   );
 }
 
-function Sidebar({ activeView, setActiveView, organization, account, openComposer, mobileMenuOpen, setMobileMenuOpen }) {
+function Sidebar({ activeView, setActiveView, organization, account, openComposer, canEdit, mobileMenuOpen, setMobileMenuOpen }) {
   const choose = (id) => {
     setActiveView(id);
     setMobileMenuOpen(false);
@@ -472,9 +644,9 @@ function Sidebar({ activeView, setActiveView, organization, account, openCompose
           <div className="brand-mark"><img src="/brand/dilg-logo.png" alt="DILG seal" /></div>
           <div><strong>Social Studio</strong><span>{organization}</span></div>
         </div>
-        <button className="new-campaign-button" onClick={openComposer} type="button">
+        {canEdit && <button className="new-campaign-button" onClick={openComposer} type="button">
           <Plus size={18} /> New campaign
-        </button>
+        </button>}
         <nav className="side-navigation" aria-label="Primary navigation">
           <span className="nav-label">Workspace</span>
           {navigation.map(({ id, label, icon: Icon }) => (
@@ -488,7 +660,7 @@ function Sidebar({ activeView, setActiveView, organization, account, openCompose
         <div className="sidebar-foot">
           <div className="storage-card">
             <div className="storage-icon"><ShieldCheck size={17} /></div>
-            <div><strong>Private by default</strong><span>Saved only on this device</span></div>
+            <div><strong>Private by default</strong><span>Shared only with this office</span></div>
           </div>
           <div className="profile-row">
             <div className="profile-avatar">{accountInitials}</div>
@@ -502,7 +674,7 @@ function Sidebar({ activeView, setActiveView, organization, account, openCompose
   );
 }
 
-function Topbar({ activeView, organization, setMobileMenuOpen, openComposer }) {
+function Topbar({ activeView, organization, setMobileMenuOpen, openComposer, canEdit }) {
   const title = navigation.find((item) => item.id === activeView)?.label || "Overview";
   return (
     <header className="topbar">
@@ -510,13 +682,13 @@ function Topbar({ activeView, organization, setMobileMenuOpen, openComposer }) {
       <div className="topbar-title"><img className="topbar-logo" src="/brand/dilg-logo.png" alt="" /><div><span className="topbar-context">{organization}</span><h1>{title}</h1></div></div>
       <div className="topbar-actions">
         <button className="icon-button" aria-label="Notifications"><Bell size={19} /><span className="notification-dot" /></button>
-        <button className="topbar-create" onClick={openComposer}><Plus size={18} /> Create</button>
+        {canEdit && <button className="topbar-create" onClick={openComposer}><Plus size={18} /> Create</button>}
       </div>
     </header>
   );
 }
 
-function Overview({ studio, openComposer, setActiveView, updateCampaignStatus }) {
+function Overview({ studio, workspaceAccess, openComposer, setActiveView, updateCampaignStatus }) {
   const stats = useMemo(() => {
     const campaigns = studio.campaigns;
     return [
@@ -540,7 +712,7 @@ function Overview({ studio, openComposer, setActiveView, updateCampaignStatus })
           <h2>Good day, Content Team.</h2>
           <p>Plan, review, and publish community updates from one calm workspace.</p>
           <div className="welcome-actions">
-            <button className="primary-button" onClick={openComposer}><Plus size={18} /> Create campaign</button>
+            {workspaceAccess.canEdit && <button className="primary-button" onClick={openComposer}><Plus size={18} /> Create campaign</button>}
             <button className="ghost-light-button" onClick={() => setActiveView("campaigns")}>View queue <ArrowRight size={17} /></button>
           </div>
         </div>
@@ -571,7 +743,7 @@ function Overview({ studio, openComposer, setActiveView, updateCampaignStatus })
                 <CampaignMedia media={campaign.images[0]} />
                 <div className="queue-copy"><strong>{campaign.title}</strong><span><Clock3 size={14} /> {formatRelativeDate(campaign.scheduledFor)}</span></div>
                 <StatusBadge status={campaign.status} />
-                {campaign.status === "Ready for review" && (
+                {workspaceAccess.canEdit && campaign.status === "Ready for review" && (
                   <button className="mini-action" onClick={() => updateCampaignStatus(campaign.id, "Approved")}>Approve</button>
                 )}
               </article>
@@ -597,7 +769,7 @@ function Overview({ studio, openComposer, setActiveView, updateCampaignStatus })
   );
 }
 
-function Campaigns({ studio, openComposer, deleteCampaign }) {
+function Campaigns({ studio, workspaceAccess, openComposer, deleteCampaign }) {
   const [filter, setFilter] = useState("All");
   const [query, setQuery] = useState("");
   const campaigns = studio.campaigns.filter((item) => {
@@ -608,7 +780,7 @@ function Campaigns({ studio, openComposer, deleteCampaign }) {
   });
   return (
     <div className="content-stack">
-      <PageIntro title="Campaigns" text="Every draft, review, schedule, and published post in one place." action="New campaign" onAction={() => openComposer()} />
+      <PageIntro title="Campaigns" text="Every draft, review, schedule, and published post in one place." action={workspaceAccess.canEdit ? "New campaign" : ""} onAction={() => openComposer()} />
       <section className="panel campaign-browser">
         <div className="browser-toolbar">
           <div className="search-box"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search campaigns" /></div>
@@ -626,7 +798,7 @@ function Campaigns({ studio, openComposer, deleteCampaign }) {
                   <td><StatusBadge status={campaign.status} /></td>
                   <td><span className="table-muted">{formatRelativeDate(campaign.scheduledFor)}</span></td>
                   <td><span className="media-count"><Images size={16} /> {campaign.images.length}</span></td>
-                  <td><div className="row-actions"><button onClick={() => openComposer(campaign)} aria-label="Edit campaign"><PencilLine size={17} /></button>{campaign.status === "Approved" && <button onClick={() => openComposer(campaign)} aria-label="Open campaign to publish"><Send size={17} /></button>}<button className="danger" onClick={() => deleteCampaign(campaign.id)} aria-label="Delete campaign"><Trash2 size={17} /></button></div></td>
+                  <td><div className="row-actions">{workspaceAccess.canEdit && <button onClick={() => openComposer(campaign)} aria-label="Edit campaign"><PencilLine size={17} /></button>}{workspaceAccess.canEdit && campaign.status === "Approved" && <button onClick={() => openComposer(campaign)} aria-label="Open campaign to publish"><Send size={17} /></button>}{workspaceAccess.canEdit && <button className="danger" onClick={() => deleteCampaign(campaign.id)} aria-label="Delete campaign"><Trash2 size={17} /></button>}</div></td>
                 </tr>
               ))}
             </tbody>
@@ -638,20 +810,48 @@ function Campaigns({ studio, openComposer, deleteCampaign }) {
   );
 }
 
-function Templates({ studio, setStudio }) {
+function Templates({ studio, setStudio, workspaceAccess, selectedPageId }) {
   const fileRef = useRef(null);
   const replaceRef = useRef(null);
   const [editor, setEditor] = useState(null);
+  const [uploadKind, setUploadKind] = useState("photo");
+  const canManage = Boolean(workspaceAccess?.canManageTemplates);
   async function addTemplate(event) {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
       const prepared = await prepareTemplateImage(file);
-      const template = { id: createId("template"), name: file.name.replace(/\.[^.]+$/, ""), size: prepared.size, ratio: prepared.ratio, image: prepared.src, usage: 0, createdAt: new Date().toISOString() };
-      setStudio((current) => ({ ...current, templates: [template, ...current.templates] }));
-      toast.success("Template saved on this device.");
-    } catch {
-      toast.error("That image could not be added.");
+      const id = createId("template");
+      const asset = await uploadWorkspaceImage(prepared.blob, {
+        id,
+        kind: "template",
+        pageId: selectedPageId,
+        officeId: workspaceAccess?.id,
+        name: file.name,
+      });
+      const template = {
+        id,
+        name: file.name.replace(/\.[^.]+$/, ""),
+        kind: uploadKind,
+        width: prepared.width,
+        height: prepared.height,
+        size: prepared.size,
+        ratio: prepared.ratio,
+        image: prepared.src,
+        assetUrl: asset.url,
+        suggestedLayers: [],
+        usage: 0,
+        createdAt: new Date().toISOString(),
+      };
+      const response = await requestJson("/api/workspace/templates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedPageId },
+        body: JSON.stringify({ pageId: selectedPageId, template }),
+      });
+      setStudio((current) => ({ ...current, templates: [{ ...response.template, image: prepared.src }, ...current.templates] }));
+      toast.success(`${uploadKind === "cover" ? "Cover" : "Photo"} template saved for this office.`);
+    } catch (error) {
+      toast.error(error.message || "That image could not be added.");
     } finally {
       event.target.value = "";
     }
@@ -660,75 +860,118 @@ function Templates({ studio, setStudio }) {
     setStudio((current) => ({ ...current, settings: { ...current.settings, defaultTemplateId: id } }));
     toast.success("Default template updated.");
   }
-  function removeTemplate(id) {
-    if (studio.templates.length <= 1) return toast.error("Keep at least one template in the workspace.");
+  async function removeTemplate(id) {
     const selected = studio.templates.find((item) => item.id === id);
     if (!selected || !window.confirm(`Delete “${selected.name}”? Campaigns using it will move to another template.`)) return;
-    setStudio((current) => {
-      const templates = current.templates.filter((item) => item.id !== id);
-      const fallbackId = templates[0].id;
-      return {
-        ...current,
-        templates,
-        settings: {
-          ...current.settings,
-          defaultTemplateId: current.settings.defaultTemplateId === id ? fallbackId : current.settings.defaultTemplateId,
-        },
-        campaigns: current.campaigns.map((campaign) => campaign.templateId === id ? { ...campaign, templateId: fallbackId, updatedAt: new Date().toISOString() } : campaign),
-        activity: [{ id: createId("activity"), type: "deleted", text: `${selected.name} template was deleted`, at: new Date().toISOString() }, ...current.activity],
-      };
-    });
-    setEditor(null);
-    toast.success("Template removed.");
+    try {
+      await requestJson("/api/workspace/templates", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedPageId },
+        body: JSON.stringify({ pageId: selectedPageId, templateId: id }),
+      });
+      setStudio((current) => {
+        const templates = current.templates.filter((item) => item.id !== id);
+        const fallbackId = templates.find((item) => item.kind !== "cover")?.id || "";
+        return {
+          ...current,
+          templates,
+          settings: {
+            ...current.settings,
+            defaultTemplateId: current.settings.defaultTemplateId === id ? fallbackId : current.settings.defaultTemplateId,
+          },
+          campaigns: current.campaigns.map((campaign) => campaign.templateId === id ? { ...campaign, templateId: fallbackId, updatedAt: new Date().toISOString() } : campaign),
+          activity: [{ id: createId("activity"), type: "deleted", text: `${selected.name} template was deleted`, at: new Date().toISOString() }, ...current.activity],
+        };
+      });
+      setEditor(null);
+      toast.success("Template removed from this office.");
+    } catch (error) {
+      toast.error(error.message || "The template could not be deleted.");
+    }
   }
   async function replaceTemplateImage(event) {
     const file = event.target.files?.[0];
     if (!file || !editor) return;
     try {
       const prepared = await prepareTemplateImage(file);
-      setEditor((current) => ({ ...current, image: prepared.src, size: prepared.size, ratio: prepared.ratio }));
+      const asset = await uploadWorkspaceImage(prepared.blob, {
+        id: editor.id,
+        kind: "template",
+        pageId: selectedPageId,
+        officeId: workspaceAccess?.id,
+        name: file.name,
+      });
+      setEditor((current) => ({ ...current, image: prepared.src, assetUrl: asset.url, width: prepared.width, height: prepared.height, size: prepared.size, ratio: prepared.ratio }));
       toast.success("New template image is ready to save.");
-    } catch {
-      toast.error("That template image could not be prepared.");
+    } catch (error) {
+      toast.error(error.message || "That template image could not be prepared.");
     } finally { event.target.value = ""; }
   }
-  function saveTemplateEdit() {
+  async function saveTemplateEdit() {
     const name = editor?.name?.trim();
     if (!editor || !name) return toast.error("Template name is required.");
-    setStudio((current) => ({
-      ...current,
-      templates: current.templates.map((item) => item.id === editor.id ? { ...item, ...editor, name, updatedAt: new Date().toISOString() } : item),
-      activity: [{ id: createId("activity"), type: "created", text: `${name} template was updated`, at: new Date().toISOString() }, ...current.activity],
-    }));
-    setEditor(null);
-    toast.success("Template updated.");
+    try {
+      const response = await requestJson("/api/workspace/templates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedPageId },
+        body: JSON.stringify({ pageId: selectedPageId, template: { ...editor, name } }),
+      });
+      setStudio((current) => ({
+        ...current,
+        templates: current.templates.map((item) => item.id === editor.id ? { ...response.template, image: editor.image } : item),
+        activity: [{ id: createId("activity"), type: "created", text: `${name} template was updated`, at: new Date().toISOString() }, ...current.activity],
+      }));
+      setEditor(null);
+      toast.success("Template updated for this office.");
+    } catch (error) {
+      toast.error(error.message || "The template could not be updated.");
+    }
   }
   return (
     <div className="content-stack">
-      <PageIntro title="Brand templates" text="Upload the approved frame for each office. The included Gensan layouts are editable samples and can be replaced or deleted." action="Upload template" onAction={() => fileRef.current?.click()} />
+      <PageIntro title="Office templates" text="Photo and cover templates are private to this office. Templates stay locked while campaign text remains editable." action={canManage ? "Upload template" : ""} onAction={() => fileRef.current?.click()} />
+      <div className="template-kind-toolbar">
+        <div role="tablist" aria-label="Template type">
+          <button type="button" className={uploadKind === "photo" ? "active" : ""} onClick={() => setUploadKind("photo")}>Photo templates</button>
+          <button type="button" className={uploadKind === "cover" ? "active" : ""} onClick={() => setUploadKind("cover")}>Cover templates</button>
+        </div>
+        {!canManage && <span><ShieldCheck size={15} /> Office administrators manage this library.</span>}
+      </div>
       <input ref={fileRef} type="file" accept="image/*" hidden onChange={addTemplate} />
       <div className="template-grid">
-        {studio.templates.map((template) => {
+        {studio.templates.filter((template) => (template.kind || "photo") === uploadKind).map((template) => {
           const isDefault = studio.settings.defaultTemplateId === template.id;
           const usage = studio.campaigns.filter((campaign) => campaign.templateId === template.id).length;
           return (
             <motion.article className="template-card" layout key={template.id}>
-              <div className="template-preview"><img src={template.image} alt={`${template.name} preview`} />{isDefault && <span className="default-chip"><Check size={14} /> Default</span>}</div>
-              <div className="template-meta"><div><strong>{template.name}</strong><span>{template.size} · {template.ratio}</span></div><button className="icon-button subtle" onClick={() => setEditor({ ...template })} aria-label={`Edit ${template.name}`}><PencilLine size={18} /></button></div>
-              <div className="template-actions"><span>{usage} campaign{usage === 1 ? "" : "s"}</span>{!isDefault && <button onClick={() => setDefault(template.id)}>Make default</button>}<button onClick={() => setEditor({ ...template })}>Edit</button><button className="danger-link" onClick={() => removeTemplate(template.id)}>Delete</button></div>
+              <div className="template-preview"><img src={template.image} alt={`${template.name} preview`} />{isDefault && <span className="default-chip"><Check size={14} /> Default</span>}<span className="template-kind-chip">{template.kind === "cover" ? "Cover" : "Photo"}</span></div>
+              <div className="template-meta"><div><strong>{template.name}</strong><span>{template.size} · {template.ratio}</span></div>{canManage && <button className="icon-button subtle" onClick={() => setEditor({ ...template })} aria-label={`Edit ${template.name}`}><PencilLine size={18} /></button>}</div>
+              <div className="template-actions"><span>{usage} campaign{usage === 1 ? "" : "s"}</span>{template.kind !== "cover" && !isDefault && <button onClick={() => setDefault(template.id)}>Make default</button>}{canManage && <button onClick={() => setEditor({ ...template })}>Edit</button>}{canManage && <button className="danger-link" onClick={() => removeTemplate(template.id)}>Delete</button>}</div>
             </motion.article>
           );
         })}
-        <button className="template-upload-card" onClick={() => fileRef.current?.click()}><span><Upload size={22} /></span><strong>Add a new template</strong><small>Transparent PNG recommended · up to 10 MB</small></button>
+        {canManage && <button className="template-upload-card" onClick={() => fileRef.current?.click()}><span><Upload size={22} /></span><strong>Add a {uploadKind} template</strong><small>Transparent PNG recommended · up to 12 MB</small></button>}
+        {!studio.templates.some((template) => (template.kind || "photo") === uploadKind) && !canManage && <EmptyState icon={Images} title={`No ${uploadKind} templates yet`} text="Ask your office administrator to upload an approved template." />}
       </div>
       <AnimatePresence>
-        {editor && (
+        {editor && canManage && (
           <motion.div className="template-editor-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
             <motion.section className="template-editor" role="dialog" aria-modal="true" aria-label={`Edit ${editor.name}`} initial={{ opacity: 0, scale: .96, y: 18 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: .97, y: 10 }}>
               <header><div><span className="section-kicker"><PencilLine size={14} /> Template editor</span><h3>Update template</h3></div><button className="icon-button" onClick={() => setEditor(null)} aria-label="Close template editor"><X size={19} /></button></header>
               <div className="template-editor-body">
                 <div className="template-editor-preview"><img src={editor.image} alt="Updated template preview" /><button className="secondary-button" onClick={() => replaceRef.current?.click()}><Upload size={17} /> Replace image</button><input ref={replaceRef} type="file" accept="image/*" hidden onChange={replaceTemplateImage} /></div>
-                <div className="template-editor-fields"><Field label="Template name"><input value={editor.name} onChange={(event) => setEditor({ ...editor, name: event.target.value })} /></Field><div className="template-editor-details"><span>Canvas</span><strong>{editor.size} · {editor.ratio}</strong></div><p>Replacing the image keeps this template connected to existing campaigns. Use a transparent PNG when the campaign photo should remain visible behind the frame.</p></div>
+                <div className="template-editor-fields">
+                  <Field label="Template name"><input value={editor.name} onChange={(event) => setEditor({ ...editor, name: event.target.value })} /></Field>
+                  <Field label="Template use"><select value={editor.kind || "photo"} onChange={(event) => setEditor({ ...editor, kind: event.target.value })}><option value="photo">Event photos</option><option value="cover">Cover pages only</option></select></Field>
+                  {editor.kind === "cover" && (
+                    <div className="cover-template-guides">
+                      <strong>Suggested text positions</strong>
+                      <p>These are starting points. Campaign users can still move every text layer.</p>
+                      {["campaign_title", "date", "venue"].map((source) => <Field key={source} label={source === "campaign_title" ? "Campaign title" : source === "date" ? "Date" : "Venue"}><select value={suggestedPositionName(editor.suggestedLayers, source)} onChange={(event) => setEditor((current) => ({ ...current, suggestedLayers: updateSuggestedPosition(current.suggestedLayers, source, event.target.value) }))}><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option></select></Field>)}
+                    </div>
+                  )}
+                  <div className="template-editor-details"><span>Canvas</span><strong>{editor.size} · {editor.ratio}</strong></div><p>Replacing the image keeps the template locked in campaigns. Event-specific text remains a separate editable layer.</p>
+                </div>
               </div>
               <footer><button className="danger-button" onClick={() => removeTemplate(editor.id)}><Trash2 size={17} /> Delete template</button><div><button className="secondary-button" onClick={() => setEditor(null)}>Cancel</button><button className="primary-button" onClick={saveTemplateEdit}><Check size={17} /> Save changes</button></div></footer>
             </motion.section>
@@ -753,11 +996,12 @@ function ActivityView({ studio }) {
   );
 }
 
-function SettingsView({ studio, setStudio, facebookDirectory, setFacebookDirectory, refreshFacebookDirectory }) {
+function SettingsView({ studio, setStudio, workspaceAccess, selectedPageId, facebookDirectory, setFacebookDirectory, refreshFacebookDirectory }) {
   const importRef = useRef(null);
   const [settings, setSettings] = useState(studio.settings);
   function save() {
     setStudio((current) => ({ ...current, settings }));
+    saveStudioState({ version: INITIAL_STATE.version, settings, templates: [], campaigns: [], activity: [] }, `${facebookDirectory.accountKey || "account"}:${selectedPageId}`);
     toast.success("Workspace settings saved.");
   }
   function exportData() {
@@ -776,21 +1020,20 @@ function SettingsView({ studio, setStudio, facebookDirectory, setFacebookDirecto
     try {
       const parsed = JSON.parse(await file.text());
       if (!Array.isArray(parsed.campaigns) || !Array.isArray(parsed.templates)) throw new Error();
-      const nextStudio = { ...INITIAL_STATE, ...parsed, settings: { ...INITIAL_STATE.settings, ...parsed.settings } };
-      setStudio(nextStudio);
-      setSettings(nextStudio.settings);
-      toast.success("Workspace backup restored.");
-    } catch {
-      toast.error("That file is not a valid Social Studio backup.");
+      const migrated = await prepareLocalWorkspaceImport(parsed, selectedPageId, workspaceAccess?.id);
+      await requestJson("/api/workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-facebook-page-id": selectedPageId },
+        body: JSON.stringify({ pageId: selectedPageId, ...migrated }),
+      });
+      const refreshed = await requestJson("/api/workspace", { headers: { "x-facebook-page-id": selectedPageId } });
+      const nextSettings = { ...INITIAL_STATE.settings, ...parsed.settings };
+      setStudio((current) => ({ ...current, settings: nextSettings, templates: refreshed.templates, campaigns: refreshed.campaigns }));
+      setSettings(nextSettings);
+      toast.success("Legacy backup copied into this office’s shared workspace.");
+    } catch (error) {
+      toast.error(error.message || "That backup could not be imported.");
     } finally { event.target.value = ""; }
-  }
-  function reset() {
-    if (!window.confirm("Reset all local campaigns, templates, and settings to the sample workspace?")) return;
-    window.localStorage.removeItem(STORAGE_KEY);
-    const nextStudio = structuredClone(INITIAL_STATE);
-    setStudio(nextStudio);
-    setSettings(nextStudio.settings);
-    toast.success("Local workspace reset.");
   }
   return (
     <div className="content-stack settings-width">
@@ -812,9 +1055,9 @@ function SettingsView({ studio, setStudio, facebookDirectory, setFacebookDirecto
         <ToggleRow title="Workspace notifications" text="Show local reminders for scheduled campaigns." checked={settings.notifications} onChange={(value) => setSettings({ ...settings, notifications: value })} />
       </section>
       <section className="settings-section panel">
-        <div className="settings-title"><div className="settings-glyph emerald"><Download size={20} /></div><div><h3>Local data</h3><p>Everything is stored in this browser. Keep a backup when moving devices.</p></div></div>
-        <div className="data-actions"><button className="secondary-button" onClick={exportData}><Download size={17} /> Export backup</button><button className="secondary-button" onClick={() => importRef.current?.click()}><Upload size={17} /> Import backup</button><button className="danger-button" onClick={reset}><Trash2 size={17} /> Reset workspace</button><input ref={importRef} type="file" accept="application/json" hidden onChange={importData} /></div>
-        <div className="security-note"><ShieldCheck size={18} /><span><strong>Facebook Page tokens stay on the server.</strong> Connected tokens are encrypted before database storage and are never sent to the browser or included in local backups. Every publishing request also names the selected Page and verifies that it belongs to the signed-in account.</span></div>
+        <div className="settings-title"><div className="settings-glyph emerald"><Download size={20} /></div><div><h3>Shared workspace backup</h3><p>Campaigns and templates are stored by office in Neon. Export a readable backup or import a legacy browser backup without replacing existing records.</p></div></div>
+        <div className="data-actions"><button className="secondary-button" onClick={exportData}><Download size={17} /> Export backup</button><button className="secondary-button" onClick={() => importRef.current?.click()} disabled={!workspaceAccess?.canEdit}><Upload size={17} /> Import legacy backup</button><input ref={importRef} type="file" accept="application/json" hidden onChange={importData} /></div>
+        <div className="security-note"><ShieldCheck size={18} /><span><strong>Office records and private images are checked on every request.</strong> Facebook tokens stay encrypted on the server, and imported records are copied only into the currently approved office.</span></div>
       </section>
       <div className="settings-save"><button className="primary-button" onClick={save}><Check size={17} /> Save settings</button></div>
     </div>
@@ -972,25 +1215,59 @@ function FacebookAdminSetup({ missing = [], onRefresh }) {
   );
 }
 
-function Composer({ draft, setDraft, templates, settings, facebookPage, canPublish, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
+function Composer({ draft, setDraft, templates, settings, facebookPage, workspaceAccess, canPublish, onClose, onSave, onReview, onPublish, publishing, publishProgress }) {
   const fileRef = useRef(null);
+  const coverFileRef = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [draggedImageId, setDraggedImageId] = useState(null);
   const [editingImageId, setEditingImageId] = useState(null);
-  const [editingOverlay, setEditingOverlay] = useState(false);
-  const activeTemplate = templates.find((item) => item.id === draft.templateId) || templates[0];
+  const [editingCover, setEditingCover] = useState(false);
+  const [focusLayerId, setFocusLayerId] = useState("");
+  const [customText, setCustomText] = useState("");
+  const photoTemplates = templates.filter((item) => (item.kind || "photo") === "photo");
+  const coverTemplates = templates.filter((item) => item.kind === "cover");
+  const activeTemplate = photoTemplates.find((item) => item.id === draft.templateId) || null;
+  const activeCoverTemplate = coverTemplates.find((item) => item.id === draft.cover?.templateId) || null;
   const hasVideo = draft.images.some((item) => item.type === "video");
   const editingImage = draft.images.find((item) => item.id === editingImageId && item.type !== "video");
-  const overlayPreviewImage = draft.images.find((item) => item.type !== "video");
+  const coverMedia = resolveCoverMedia(draft);
+  const maxEventPhotos = draft.cover?.enabled ? 7 : 8;
   const publishingIdentity = facebookPage?.name || settings.organization || "DILG Region XII";
   const organizationHashtag = `#${publishingIdentity.replace(/[^A-Za-z0-9]/g, "") || "DILGRegionXII"}`;
   const defaultLocation = publishingIdentity.replace(/^DILG\s*/i, "").trim() || "Region XII";
+
+  function updateCover(changes) {
+    setDraft((current) => ({ ...current, cover: { ...normalizeCover(current.cover), ...changes } }));
+  }
+  function updateEventFields(changes) {
+    setDraft((current) => ({ ...current, eventFields: { ...DEFAULT_EVENT_FIELDS, ...current.eventFields, ...changes } }));
+  }
+  function openLayer(source, text = "") {
+    let layer = draft.textLayers.find((item) => item.source === source);
+    if (!layer) {
+      const scope = draft.cover?.enabled ? "cover" : "all_photos";
+      layer = createTextLayer(source, scope);
+      if (source === "custom") layer.text = text || "Custom text";
+      const suggestion = scope === "cover" ? activeCoverTemplate?.suggestedLayers?.find((item) => item.source === source) : null;
+      if (suggestion) layer = { ...layer, ...suggestion, id: layer.id, source, scope };
+      setDraft((current) => ({ ...current, textLayers: [...current.textLayers, layer] }));
+    }
+    setFocusLayerId(layer.id);
+    if (layer.scope === "cover") {
+      if (!coverMedia) return toast.info("Choose a cover image before placing this text.");
+      setEditingCover(true);
+    } else {
+      const targetId = layer.scope === "selected_photo" ? layer.photoId : draft.images.find((item) => item.type !== "video")?.id;
+      if (!targetId) return toast.info("Add a photo before placing this text.");
+      setEditingImageId(targetId);
+    }
+  }
   async function addMedia(files) {
     const selected = [...files];
     const videoFiles = selected.filter((file) => file.type.startsWith("video/"));
     if (videoFiles.length) {
-      if (selected.length !== 1 || draft.images.length) return toast.error("A video campaign can contain one video and no photos.");
+      if (selected.length !== 1 || draft.images.length || draft.cover?.enabled) return toast.error("A video campaign can contain one video and no cover page.");
       const file = videoFiles[0];
       if (!["video/mp4", "video/quicktime", "video/webm"].includes(file.type)) return toast.error("Use an MP4, MOV, or WebM video.");
       if (file.size > 500 * 1024 * 1024) return toast.error("Videos must be smaller than 500 MB.");
@@ -1005,7 +1282,7 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, canPubli
           multipart: file.size > 100 * 1024 * 1024,
           onUploadProgress: ({ percentage }) => setUploadProgress(Math.round(percentage)),
         });
-        setDraft((current) => ({ ...current, images: [{ id: createId("video"), type: "video", name: file.name, src: blob.url, size: file.size, ...metadata }] }));
+        setDraft((current) => ({ ...current, images: [{ id: createId("video"), type: "video", name: file.name, src: blob.url, size: file.size, ...metadata }], storySourceId: "" }));
         toast.success("Video uploaded to secure media storage.");
       } catch (error) {
         toast.error(error.message || "The video could not be uploaded.", { duration: 7000 });
@@ -1016,26 +1293,74 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, canPubli
       return;
     }
     if (hasVideo) return toast.error("Remove the video before adding photos.");
-    const imageFiles = selected.filter((file) => file.type.startsWith("image/")).slice(0, 8 - draft.images.length);
-    if (!imageFiles.length) return;
+    const imageFiles = selected.filter((file) => file.type.startsWith("image/")).slice(0, Math.max(0, maxEventPhotos - draft.images.length));
+    if (!imageFiles.length) return toast.error(`This campaign can use up to ${maxEventPhotos} event photos${draft.cover?.enabled ? " plus one cover page" : ""}.`);
     setUploading(true);
     try {
-      const images = await Promise.all(imageFiles.map(async (file) => ({ id: createId("image"), type: "image", name: file.name, src: await compressImage(file), edit: { ...DEFAULT_PHOTO_EDIT } })));
-      setDraft((current) => ({ ...current, images: [...current.images, ...images] }));
-      toast.success(`${images.length} image${images.length === 1 ? "" : "s"} added.`);
-    } catch {
-      toast.error("One of those images could not be added.");
-    } finally { setUploading(false); }
+      const images = [];
+      for (const file of imageFiles) {
+        const id = createId("image");
+        const prepared = await prepareCampaignImage(file);
+        const asset = await uploadWorkspaceImage(prepared.blob, {
+          id,
+          kind: "campaign",
+          pageId: facebookPage?.id,
+          officeId: workspaceAccess?.id,
+          name: file.name,
+        });
+        images.push({ id, type: "image", name: file.name, src: prepared.src, assetUrl: asset.url, width: prepared.width, height: prepared.height, edit: { ...DEFAULT_PHOTO_EDIT } });
+      }
+      setDraft((current) => ({ ...current, images: [...current.images, ...images], storySourceId: current.storySourceId || images[0]?.id || "" }));
+      toast.success(`${images.length} image${images.length === 1 ? "" : "s"} added to the shared office workspace.`);
+    } catch (error) {
+      toast.error(error.message || "One of those images could not be added.", { duration: 7000 });
+    } finally {
+      setUploading(false);
+    }
+  }
+  async function addCoverFile(file) {
+    if (!file?.type.startsWith("image/")) return;
+    setUploading(true);
+    try {
+      const id = createId("cover");
+      const prepared = await prepareCampaignImage(file);
+      const asset = await uploadWorkspaceImage(prepared.blob, {
+        id,
+        kind: "cover",
+        pageId: facebookPage?.id,
+        officeId: workspaceAccess?.id,
+        name: file.name,
+      });
+      updateCover({
+        enabled: true,
+        sourceMode: "upload",
+        media: { id, type: "image", name: file.name, src: prepared.src, assetUrl: asset.url, width: prepared.width, height: prepared.height, edit: { ...DEFAULT_PHOTO_EDIT } },
+        edit: { ...DEFAULT_PHOTO_EDIT },
+      });
+      setDraft((current) => ({ ...current, storySourceId: current.storySourceId || "cover" }));
+      toast.success("Separate cover image added.");
+    } catch (error) {
+      toast.error(error.message || "The cover image could not be uploaded.", { duration: 7000 });
+    } finally {
+      setUploading(false);
+    }
   }
   function removeImage(id) {
     if (editingImageId === id) setEditingImageId(null);
-    setDraft((current) => ({ ...current, images: current.images.filter((item) => item.id !== id) }));
+    setDraft((current) => {
+      const images = current.images.filter((item) => item.id !== id);
+      const cover = normalizeCover(current.cover);
+      if (cover.sourceImageId === id) cover.sourceImageId = images.find((item) => item.type !== "video")?.id || "";
+      return {
+        ...current,
+        images,
+        cover,
+        storySourceId: current.storySourceId === id ? (cover.enabled ? "cover" : images[0]?.id || "") : current.storySourceId,
+      };
+    });
   }
   function updatePhotoEdit(id, edit) {
     setDraft((current) => ({ ...current, images: current.images.map((item) => item.id === id ? { ...item, edit: normalizePhotoEdit(edit) } : item) }));
-  }
-  function updateEventOverlay(changes) {
-    setDraft((current) => ({ ...current, eventOverlay: { ...normalizeEventOverlay(current.eventOverlay), ...changes } }));
   }
   function toggleDestination(destination) {
     const current = draft.destinations?.length ? draft.destinations : [];
@@ -1061,8 +1386,7 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, canPubli
       if (sourceIndex < 0 || targetIndex < 0) return current;
       const images = [...current.images];
       const [moved] = images.splice(sourceIndex, 1);
-      const adjustedTarget = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
-      images.splice(adjustedTarget, 0, moved);
+      images.splice(sourceIndex < targetIndex ? targetIndex - 1 : targetIndex, 0, moved);
       return { ...current, images };
     });
   }
@@ -1073,400 +1397,193 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, canPubli
         <div className="composer-body">
           <div className="composer-form">
             <section className="composer-section">
-              <div className="step-heading"><span>1</span><div><h3>Campaign details</h3><p>Name the campaign so your team can find it later.</p></div></div>
-              <Field label="Campaign title"><input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Barangay Assembly Highlights" autoFocus /></Field>
+              <div className="step-heading"><span>1</span><div><h3>Campaign details</h3><p>The Campaign title can also become a live, plain-text design layer.</p></div></div>
+              <div className="linked-title-field">
+                <Field label="Campaign title"><input value={draft.title} maxLength={160} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Barangay Assembly Highlights" autoFocus /></Field>
+                <button className="secondary-button add-design-text" type="button" onClick={() => openLayer("campaign_title")}><TypeIcon /> {draft.textLayers.some((item) => item.source === "campaign_title") ? "Edit title in design" : "Add title to design"}</button>
+              </div>
             </section>
+
             <section className="composer-section">
-              <div className="step-heading"><span>2</span><div><h3>Add photos or a video</h3><p>Use up to 8 photos, or one video for Feed and My Day.</p></div></div>
+              <div className="step-heading"><span>2</span><div><h3>Add photos or a video</h3><p>Use up to {maxEventPhotos} event photos{draft.cover?.enabled ? " plus the cover page" : ""}, or one video.</p></div></div>
+              {!workspaceAccess?.assetStorage?.available && <div className="editor-storage-warning"><ShieldCheck size={17} /><span><strong>Private editor storage is not connected.</strong> Add <code>EDITOR_BLOB_READ_WRITE_TOKEN</code> in Vercel before uploading photos or templates. The existing public video store remains separate.</span></div>}
               <button className="drop-zone" type="button" disabled={uploading} onClick={() => fileRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addMedia(event.dataTransfer.files); }}>
-                <span className="upload-glyph">{uploading ? <CloudUpload className="upload-pulse" size={23} /> : <ImagePlus size={23} />}</span><strong>{uploading ? uploadProgress ? `Uploading video… ${uploadProgress}%` : "Preparing media…" : "Drop photos or a video here"}</strong><small>Photos: JPG, PNG, WebP · Video: MP4, MOV, WebM up to 500 MB</small>
+                <span className="upload-glyph">{uploading ? <CloudUpload className="upload-pulse" size={23} /> : <ImagePlus size={23} />}</span><strong>{uploading ? uploadProgress ? `Uploading video… ${uploadProgress}%` : "Preparing shared media…" : "Drop photos or a video here"}</strong><small>Photos are private to this office · JPG, PNG, WebP · Videos up to 500 MB</small>
               </button>
               <input ref={fileRef} hidden type="file" accept="image/*,video/mp4,video/quicktime,video/webm" multiple onChange={(event) => { addMedia(event.target.files); event.target.value = ""; }} />
               {draft.images.length > 0 && (
                 <>
-                  <div className="media-order-hint">{hasVideo ? <Video size={16} /> : <GripVertical size={16} />}<span>{hasVideo ? `Video ready · ${formatDuration(draft.images[0].duration)} · ${formatFileSize(draft.images[0].size)}` : "Drag photos to rearrange them, or use the arrow controls. The first photo becomes the cover and My Day image."}</span></div>
+                  <div className="media-order-hint">{hasVideo ? <Video size={16} /> : <GripVertical size={16} />}<span>{hasVideo ? `Video ready · ${formatDuration(draft.images[0].duration)} · ${formatFileSize(draft.images[0].size)}` : "Drag event photos to rearrange their Facebook attachment order. Use Edit to adjust the image and text directly."}</span></div>
                   <div className="image-strip">
                     {draft.images.map((image, index) => (
-                      <motion.div
-                        layout
-                        transition={{ type: "spring", stiffness: 420, damping: 32 }}
-                        className={clsx("image-thumb", draggedImageId === image.id && "is-dragging")}
-                        key={image.id}
-                        draggable
-                        onDragStart={(event) => {
-                          setDraggedImageId(image.id);
-                          event.dataTransfer.effectAllowed = "move";
-                          event.dataTransfer.setData("text/plain", image.id);
-                        }}
-                        onDragEnd={() => setDraggedImageId(null)}
-                        onDragOver={(event) => {
-                          event.preventDefault();
-                          event.dataTransfer.dropEffect = "move";
-                        }}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          placeImageBefore(event.dataTransfer.getData("text/plain") || draggedImageId, image.id);
-                          setDraggedImageId(null);
-                        }}
-                      >
+                      <motion.div layout className={clsx("image-thumb", draggedImageId === image.id && "is-dragging")} key={image.id} draggable onDragStart={(event) => { setDraggedImageId(image.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", image.id); }} onDragEnd={() => setDraggedImageId(null)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); placeImageBefore(event.dataTransfer.getData("text/plain") || draggedImageId, image.id); setDraggedImageId(null); }}>
                         {image.type === "video" ? <video src={image.src} muted playsInline preload="metadata" aria-label={image.name} /> : <img src={image.src} alt={image.name} />}
-                        {index === 0 && <span className="cover-badge">Cover</span>}
-                        {image.type !== "video" && <button type="button" className="edit-photo-button" onClick={() => setEditingImageId(image.id)} aria-label={`Edit crop for ${image.name}`}><Crop size={14} /> Edit</button>}
+                        {index === 0 && !hasVideo && <span className="cover-badge">Photo 1</span>}
+                        {image.type !== "video" && <button type="button" className="edit-photo-button" onClick={() => { setFocusLayerId(""); setEditingImageId(image.id); }} aria-label={`Edit ${image.name}`}><Crop size={14} /> Edit</button>}
                         <div className="media-position" title="Drag to rearrange"><GripVertical size={14} /><span>{index + 1}</span></div>
-                        <div className="media-controls">
-                          <button type="button" onClick={() => moveImage(image.id, -1)} disabled={index === 0} aria-label={`Move ${image.name} left`}><ChevronLeft size={15} /></button>
-                          <button type="button" onClick={() => moveImage(image.id, 1)} disabled={index === draft.images.length - 1} aria-label={`Move ${image.name} right`}><ChevronRight size={15} /></button>
-                          <button type="button" className="remove-media" onClick={() => removeImage(image.id)} aria-label={`Remove ${image.name}`}><X size={15} /></button>
-                        </div>
+                        <div className="media-controls"><button type="button" onClick={() => moveImage(image.id, -1)} disabled={index === 0} aria-label={`Move ${image.name} left`}><ChevronLeft size={15} /></button><button type="button" onClick={() => moveImage(image.id, 1)} disabled={index === draft.images.length - 1} aria-label={`Move ${image.name} right`}><ChevronRight size={15} /></button><button type="button" className="remove-media" onClick={() => removeImage(image.id)} aria-label={`Remove ${image.name}`}><X size={15} /></button></div>
                       </motion.div>
                     ))}
                   </div>
                 </>
               )}
-            </section>
-            <section className="composer-section">
-              <div className="step-heading"><span>3</span><div><h3>Caption and event details</h3><p>Write the post, then optionally add an event banner to every photo.</p></div></div>
-              <Field label="Post copy" hint={`${draft.caption.length} / 2,200`}><textarea rows={7} value={draft.caption} onChange={(event) => setDraft({ ...draft, caption: event.target.value.slice(0, 2200) })} placeholder="Share the story behind this update…" /></Field>
-              <div className="caption-tools"><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}${organizationHashtag} #SerbisyongMatino` })}># Add hashtags</button><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}📍 ${defaultLocation}` })}>Add location</button></div>
-              <div className={clsx("event-overlay-panel", hasVideo && "is-disabled")}>
-                <ToggleRow title="Event information overlay" text={hasVideo ? "Available for photo campaigns" : "Add the same event banner above every photo without changing the template."} checked={!hasVideo && draft.eventOverlay?.enabled} onChange={(enabled) => !hasVideo && updateEventOverlay({ enabled })} />
-                {!hasVideo && draft.eventOverlay?.enabled && (
-                  <motion.div className="event-overlay-fields" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
-                    <Field label="Event title" hint="Uses campaign title if blank"><input value={draft.eventOverlay.title} maxLength={120} onChange={(event) => updateEventOverlay({ title: event.target.value })} placeholder={draft.title || "Event title"} /></Field>
-                    <Field label="Event date"><input type="date" value={draft.eventOverlay.date} onChange={(event) => updateEventOverlay({ date: event.target.value })} /></Field>
-                    <Field label="Location"><input value={draft.eventOverlay.location} maxLength={80} onChange={(event) => updateEventOverlay({ location: event.target.value })} placeholder={`e.g. ${defaultLocation}`} /></Field>
-                    <div className="overlay-direct-control"><span>Banner position</span><button type="button" className="secondary-button" disabled={!overlayPreviewImage} onClick={() => setEditingOverlay(true)}><Move size={17} /> Position directly on image</button><small>{overlayPreviewImage ? "Drag the complete event banner anywhere inside the composed template." : "Add a photo before positioning the banner."}</small></div>
+
+              <div className={clsx("cover-page-panel", hasVideo && "is-disabled")}>
+                <ToggleRow title="Add a cover page?" text={hasVideo ? "Cover pages are available for photo campaigns." : "Create a designed first attachment without changing the event photos."} checked={!hasVideo && draft.cover?.enabled} onChange={(enabled) => {
+                  if (hasVideo) return;
+                  if (enabled && draft.images.filter((item) => item.type !== "video").length > 7) return toast.error("Remove one event photo before adding a cover page. Facebook Feed supports eight attachments.");
+                  updateCover({ enabled, sourceImageId: draft.cover?.sourceImageId || draft.images.find((item) => item.type !== "video")?.id || "" });
+                  if (enabled) setDraft((current) => ({ ...current, storySourceId: current.storySourceId || "cover" }));
+                }} />
+                {!hasVideo && draft.cover?.enabled && (
+                  <motion.div className="cover-page-controls" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
+                    <div className="segmented-control" aria-label="Cover source">
+                      <button type="button" className={draft.cover.sourceMode === "existing" ? "active" : ""} onClick={() => updateCover({ sourceMode: "existing" })}>Use event photo</button>
+                      <button type="button" className={draft.cover.sourceMode === "upload" ? "active" : ""} onClick={() => updateCover({ sourceMode: "upload" })}>Separate image</button>
+                    </div>
+                    {draft.cover.sourceMode === "existing" ? (
+                      <Field label="Cover image"><select value={draft.cover.sourceImageId} onChange={(event) => updateCover({ sourceImageId: event.target.value })}><option value="">Choose an event photo</option>{draft.images.filter((item) => item.type !== "video").map((item, index) => <option value={item.id} key={item.id}>Photo {index + 1} · {item.name}</option>)}</select></Field>
+                    ) : (
+                      <div><button className="secondary-button" type="button" onClick={() => coverFileRef.current?.click()}><Upload size={17} /> {draft.cover.media ? "Replace cover image" : "Upload cover image"}</button><input ref={coverFileRef} hidden type="file" accept="image/*" onChange={(event) => { addCoverFile(event.target.files?.[0]); event.target.value = ""; }} />{draft.cover.media && <small className="selected-cover-name">{draft.cover.media.name}</small>}</div>
+                    )}
+                    <div className="form-grid two-columns">
+                      <Field label="Cover template"><select value={draft.cover.templateId} onChange={(event) => updateCover({ templateId: event.target.value })}><option value="">Blank square</option>{coverTemplates.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></Field>
+                      <Field label="Cover color effect"><select value={draft.cover.duotone} onChange={(event) => updateCover({ duotone: event.target.value })}><option value="cherry">Cherry duotone</option><option value="auto">Auto duotone</option><option value="none">None</option></select></Field>
+                    </div>
+                    {activeCoverTemplate && !isSquareTemplate(activeCoverTemplate) && <div className="crop-warning"><Crop size={16} /> This cover template is not square. Facebook may crop it differently across devices.</div>}
+                    <button className="primary-button edit-cover-button" type="button" disabled={!coverMedia} onClick={() => { setFocusLayerId(""); setEditingCover(true); }}><WandSparkles size={17} /> Edit cover directly</button>
                   </motion.div>
                 )}
               </div>
             </section>
+
+            <section className="composer-section">
+              <div className="step-heading"><span>3</span><div><h3>Caption and design text</h3><p>Each detail is its own movable text layer. No background or decoration is added automatically.</p></div></div>
+              <Field label="Post copy" hint={`${draft.caption.length} / 2,200`}><textarea rows={7} value={draft.caption} onChange={(event) => setDraft({ ...draft, caption: event.target.value.slice(0, 2200) })} placeholder="Share the story behind this update…" /></Field>
+              <div className="caption-tools"><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}${organizationHashtag} #SerbisyongMatino` })}># Add hashtags</button><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}📍 ${defaultLocation}` })}>Add location</button></div>
+              {!hasVideo && (
+                <div className="structured-text-panel">
+                  <StructuredTextField label="Date" type="date" value={draft.eventFields?.date || ""} onChange={(value) => updateEventFields({ date: value })} added={draft.textLayers.some((item) => item.source === "date")} onAdd={() => openLayer("date")} />
+                  <StructuredTextField label="Venue" value={draft.eventFields?.venue || ""} placeholder={`e.g. ${defaultLocation}`} onChange={(value) => updateEventFields({ venue: value })} added={draft.textLayers.some((item) => item.source === "venue")} onAdd={() => openLayer("venue")} />
+                  <StructuredTextField label="Subtitle" value={draft.eventFields?.subtitle || ""} placeholder="Optional event description" onChange={(value) => updateEventFields({ subtitle: value })} added={draft.textLayers.some((item) => item.source === "subtitle")} onAdd={() => openLayer("subtitle")} />
+                  <div className="custom-text-row"><Field label="Custom text"><input value={customText} maxLength={240} onChange={(event) => setCustomText(event.target.value)} placeholder="Add another independent text layer" /></Field><button className="secondary-button" type="button" disabled={!customText.trim()} onClick={() => { openLayer("custom", customText.trim()); setCustomText(""); }}><Plus size={17} /> Add to design</button></div>
+                </div>
+              )}
+            </section>
+
             <section className="composer-section">
               <div className="step-heading"><span>4</span><div><h3>Choose where to publish</h3><p>Send this campaign to the Facebook Feed, My Day, or both.</p></div></div>
-              <div className={clsx("publishing-page-context", facebookPage && "is-connected")}>
-                <div className="connected-page-avatar">{facebookPage?.picture ? <img src={facebookPage.picture} alt="" /> : <MessageSquareText size={18} />}</div>
-                <div><strong>{facebookPage ? `Publishing as ${facebookPage.name}` : "No Facebook Page selected"}</strong><span>{facebookPage ? "This Page is carried with every publish request, so another user or browser tab cannot redirect the post." : "Choose an authorized Facebook Page before composing this campaign."}</span></div>
-              </div>
+              <div className={clsx("publishing-page-context", facebookPage && "is-connected")}><div className="connected-page-avatar">{facebookPage?.picture ? <img src={facebookPage.picture} alt="" /> : <MessageSquareText size={18} />}</div><div><strong>{facebookPage ? `Publishing as ${facebookPage.name}` : "No Facebook Page selected"}</strong><span>{facebookPage ? "The selected office and Page are enforced by the server for this campaign." : "Choose an authorized Facebook Page before composing this campaign."}</span></div></div>
               <div className="destination-grid">
                 <button type="button" className={clsx("destination-card", draft.destinations?.includes("feed") && "selected")} aria-pressed={draft.destinations?.includes("feed")} onClick={() => toggleDestination("feed")}><span><Newspaper size={20} /></span><div><strong>Facebook Feed</strong><small>Permanent Page post</small></div><i>{draft.destinations?.includes("feed") && <Check size={14} />}</i></button>
                 <button type="button" className={clsx("destination-card", draft.destinations?.includes("story") && "selected")} aria-pressed={draft.destinations?.includes("story")} onClick={() => toggleDestination("story")}><span><Smartphone size={20} /></span><div><strong>My Day / Story</strong><small>Visible for 24 hours</small></div><i>{draft.destinations?.includes("story") && <Check size={14} />}</i></button>
               </div>
-              {draft.destinations?.includes("story") && <p className="destination-note">My Day uses the first photo or the selected video. Story text is not supported by Meta, so the caption is used on the Feed post only. My Day publishes immediately.</p>}
-              <div className="form-grid two-columns"><Field label="Template" hint={hasVideo ? "Photos only" : "Applied before publishing"}><select disabled={hasVideo} value={draft.templateId} onChange={(event) => setDraft({ ...draft, templateId: event.target.value })}>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></Field><Field label="Feed publish date & time" hint="Leave blank to publish now"><input type="datetime-local" value={toDateTimeLocal(draft.scheduledFor)} onChange={(event) => setDraft({ ...draft, scheduledFor: event.target.value })} /></Field></div>
+              <div className="form-grid two-columns">
+                <Field label="Photo template" hint={hasVideo ? "Photos only" : "Locked behind editable text"}><select disabled={hasVideo} value={draft.templateId || ""} onChange={(event) => setDraft({ ...draft, templateId: event.target.value })}><option value="">Blank square</option>{photoTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></Field>
+                <Field label="Feed publish date & time" hint="Leave blank to publish now"><input type="datetime-local" value={toDateTimeLocal(draft.scheduledFor)} onChange={(event) => setDraft({ ...draft, scheduledFor: event.target.value })} /></Field>
+              </div>
+              {activeTemplate && !isSquareTemplate(activeTemplate) && <div className="crop-warning"><Crop size={16} /> This photo template is not square. Check the mobile and desktop crop previews.</div>}
+              {draft.destinations?.includes("story") && !hasVideo && <Field label="My Day source" hint="Choose the image used for the Story"><select value={draft.storySourceId || (draft.cover?.enabled ? "cover" : draft.images[0]?.id || "")} onChange={(event) => setDraft({ ...draft, storySourceId: event.target.value })}>{draft.cover?.enabled && <option value="cover">Cover page</option>}{draft.images.filter((item) => item.type !== "video").map((item, index) => <option value={item.id} key={item.id}>Event photo {index + 1} · {item.name}</option>)}</select></Field>}
               {draft.scheduledFor && draft.destinations?.includes("story") && <div className="schedule-warning"><CalendarClock size={16} /> Remove My Day or clear the schedule. Meta Stories can only publish immediately through this connection.</div>}
             </section>
           </div>
           <aside className="preview-column">
             <div className="preview-heading"><span>Live preview</span><small>Facebook feed</small></div>
-            <FacebookPreview draft={draft} settings={settings} template={activeTemplate} facebookPage={facebookPage} />
-            <div className="preview-note"><ShieldCheck size={17} /><span>Live publishing uses the secure Meta connection configured in Vercel.</span></div>
+            <FacebookPreview draft={draft} settings={settings} photoTemplate={activeTemplate} coverTemplate={activeCoverTemplate} facebookPage={facebookPage} />
+            <div className="preview-note"><ShieldCheck size={17} /><span>Facebook may adjust the final multi-photo layout. Attachment order and exported designs are preserved.</span></div>
           </aside>
         </div>
         <footer className="composer-footer"><div className="composer-save-area"><button className="text-button" onClick={onSave} disabled={publishing}>Save draft</button>{publishing && <span className="publish-progress"><Loader2 className="spin" size={15} /> {publishProgress}</span>}</div><div><button className="secondary-button" onClick={onReview} disabled={publishing}><BadgeCheck size={17} /> Submit for review</button><button className="primary-button" onClick={onPublish} disabled={publishing || !canPublish} title={canPublish ? "" : "Your office role does not allow publishing"}>{publishing ? <Loader2 className="spin" size={17} /> : <Send size={17} />} {publishing ? "Publishing…" : canPublish ? draft.scheduledFor ? "Schedule on Facebook" : "Publish to Facebook" : "Publishing restricted"}</button></div></footer>
       </motion.section>
       <AnimatePresence>
-        {editingImage && <PhotoEditor media={editingImage} template={activeTemplate} eventOverlay={draft.eventOverlay} campaignTitle={draft.title} onChange={(edit) => updatePhotoEdit(editingImage.id, edit)} onClose={() => setEditingImageId(null)} />}
-        {editingOverlay && overlayPreviewImage && <EventOverlayEditor media={overlayPreviewImage} template={activeTemplate} eventOverlay={draft.eventOverlay} campaignTitle={draft.title} onChange={updateEventOverlay} onClose={() => setEditingOverlay(false)} />}
+        {editingImage && <CompositionEditor key={`photo-${editingImage.id}-${focusLayerId}`} media={editingImage} template={activeTemplate} layers={draft.textLayers} campaignTitle={draft.title} eventFields={draft.eventFields} target="photo" focusLayerId={focusLayerId} onMediaEdit={(edit) => updatePhotoEdit(editingImage.id, edit)} onLayersChange={(textLayers) => setDraft((current) => ({ ...current, textLayers }))} onClose={() => { setEditingImageId(null); setFocusLayerId(""); }} />}
+        {editingCover && coverMedia && <CompositionEditor key={`cover-${coverMedia.id}-${focusLayerId}`} media={{ ...coverMedia, edit: draft.cover?.edit || coverMedia.edit }} template={activeCoverTemplate} layers={draft.textLayers} campaignTitle={draft.title} eventFields={draft.eventFields} target="cover" duotone={draft.cover?.duotone} focusLayerId={focusLayerId} onMediaEdit={(edit) => updateCover({ edit })} onLayersChange={(textLayers) => setDraft((current) => ({ ...current, textLayers }))} onClose={() => { setEditingCover(false); setFocusLayerId(""); }} />}
       </AnimatePresence>
     </motion.div>
   );
 }
 
-function PhotoEditor({ media, template, eventOverlay, campaignTitle, onChange, onClose }) {
-  const edit = normalizePhotoEdit(media.edit);
-  const [gridVisible, setGridVisible] = useState(false);
-  function change(key, value) { onChange({ ...edit, [key]: value }); }
-  function rotate(amount) { change("rotation", (edit.rotation + amount + 360) % 360); }
-  function zoom(amount) { change("zoom", clamp(edit.zoom + amount, 1, 3)); }
+function TypeIcon() {
+  return <span aria-hidden="true" className="type-icon">T</span>;
+}
+
+function StructuredTextField({ label, type = "text", value, placeholder, onChange, added, onAdd }) {
   return (
-    <motion.div className="photo-editor-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <motion.section className="photo-editor" role="dialog" aria-modal="true" aria-label={`Edit ${media.name}`} initial={{ opacity: 0, y: 18, scale: .97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: .98 }}>
-        <header><div><span className="section-kicker"><Crop size={14} /> Direct photo editor</span><h3>Move the photo into place</h3><p>Drag the image, scroll or pinch to zoom, and use arrow keys for precise nudging. The template stays locked.</p></div><button className="icon-button" onClick={onClose} aria-label="Close photo editor"><X size={19} /></button></header>
-        <div className="photo-editor-body">
-          <div className="photo-editor-stage">
-            <div className={clsx("photo-editor-canvas-wrap", gridVisible && "show-grid")}>
-              <InteractivePhotoCanvas media={media} template={template} eventOverlay={eventOverlay} campaignTitle={campaignTitle} onChange={onChange} />
-              {gridVisible && <div className="crop-grid" aria-hidden="true"><i /><i /><i /><i /></div>}
-              <div className="drag-cue" aria-hidden="true"><Move size={18} /><span>Drag photo</span></div>
-            </div>
-            <div className="direct-edit-toolbar" role="toolbar" aria-label="Photo editing tools">
-              <div className="zoom-tool"><button type="button" onClick={() => zoom(-.1)} disabled={edit.zoom <= 1} aria-label="Zoom out"><ZoomOut size={18} /></button><output>{Math.round(edit.zoom * 100)}%</output><button type="button" onClick={() => zoom(.1)} disabled={edit.zoom >= 3} aria-label="Zoom in"><ZoomIn size={18} /></button></div>
-              <span className="toolbar-divider" />
-              <button type="button" onClick={() => rotate(-90)} title="Rotate left"><RotateCcw size={18} /><span>Left</span></button>
-              <button type="button" onClick={() => rotate(90)} title="Rotate right"><RotateCw size={18} /><span>Right</span></button>
-              <button type="button" onClick={() => onChange({ ...edit, positionX: 50, positionY: 50 })} title="Center photo"><Move size={18} /><span>Center</span></button>
-              <button type="button" className={gridVisible ? "active" : ""} aria-pressed={gridVisible} onClick={() => setGridVisible((current) => !current)} title="Toggle alignment grid"><Grid3X3 size={18} /><span>Grid</span></button>
-            </div>
-            <div className="direct-edit-help"><span><Move size={15} /> Drag to reposition</span><span><ZoomIn size={15} /> Scroll or pinch to zoom</span><span>⌨ Arrow keys nudge · Shift moves farther</span></div>
-          </div>
-        </div>
-        <footer><button className="secondary-button" onClick={() => onChange({ ...DEFAULT_PHOTO_EDIT })}><RefreshCcw size={17} /> Reset photo</button><button className="primary-button" onClick={onClose}><Check size={17} /> Done editing</button></footer>
-      </motion.section>
-    </motion.div>
+    <div className="structured-text-row">
+      <Field label={label}><input type={type} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} /></Field>
+      <button className="secondary-button" type="button" onClick={onAdd}><TypeIcon /> {added ? "Edit in design" : "Add to design"}</button>
+    </div>
   );
 }
 
-function EventOverlayEditor({ media, template, eventOverlay, campaignTitle, onChange, onClose }) {
-  const overlay = normalizeEventOverlay(eventOverlay);
-  return (
-    <motion.div className="photo-editor-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <motion.section className="photo-editor overlay-position-editor" role="dialog" aria-modal="true" aria-label="Position event information banner" initial={{ opacity: 0, y: 18, scale: .97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: .98 }}>
-        <header><div><span className="section-kicker"><Move size={14} /> Direct overlay editor</span><h3>Place the event banner</h3><p>Drag the title, date, and location together on the composed image. This position will be used on every photo while the template remains unchanged.</p></div><button className="icon-button" onClick={onClose} aria-label="Close overlay editor"><X size={19} /></button></header>
-        <div className="photo-editor-body">
-          <div className="photo-editor-stage overlay-editor-stage">
-            <div className="photo-editor-canvas-wrap overlay-canvas-wrap">
-              <InteractiveOverlayCanvas media={media} template={template} eventOverlay={overlay} campaignTitle={campaignTitle || "Event title"} onChange={onChange} />
-              <div className="drag-cue overlay-drag-cue" aria-hidden="true"><Move size={18} /><span>Drag event banner</span></div>
-            </div>
-            <div className="direct-edit-help"><span><Move size={15} /> Drag the banner itself</span><span>⌨ Arrow keys nudge · Shift moves farther</span><span>The photo and template stay locked</span></div>
-          </div>
-        </div>
-        <footer><button className="secondary-button" onClick={() => onChange({ position: "bottom-left", positionX: 0, positionY: 100 })}><RefreshCcw size={17} /> Reset position</button><button className="primary-button" onClick={onClose}><Check size={17} /> Use this position</button></footer>
-      </motion.section>
-    </motion.div>
-  );
+function suggestedPositionName(suggestions, source) {
+  const suggestion = (Array.isArray(suggestions) ? suggestions : []).find((item) => item.source === source);
+  const y = Number(suggestion?.y ?? (source === "campaign_title" ? 68 : 80));
+  return y < 34 ? "top" : y < 66 ? "middle" : "bottom";
 }
 
-function InteractiveOverlayCanvas({ media, template, eventOverlay, campaignTitle, onChange }) {
-  const canvasRef = useRef(null);
-  const assetsRef = useRef(null);
-  const dragRef = useRef(null);
-  const overlayRef = useRef(normalizeEventOverlay(eventOverlay));
-  const [assets, setAssets] = useState(null);
-  const [dragging, setDragging] = useState(false);
-  const edit = useMemo(() => normalizePhotoEdit(media.edit), [media.edit]);
-  const overlay = useMemo(() => normalizeEventOverlay(eventOverlay), [eventOverlay]);
-
-  useEffect(() => { overlayRef.current = overlay; }, [overlay]);
-  useEffect(() => {
-    let active = true;
-    Promise.all([loadBrowserImage(media.src), template?.image ? loadBrowserImage(template.image) : null]).then(([source, templateImage]) => {
-      if (!active) return;
-      const nextAssets = { source, templateImage };
-      assetsRef.current = nextAssets;
-      setAssets(nextAssets);
-    }).catch(() => {});
-    return () => { active = false; };
-  }, [media.src, template?.image]);
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !assets) return;
-    const width = assets.templateImage?.naturalWidth || assets.source.naturalWidth;
-    const height = assets.templateImage?.naturalHeight || assets.source.naturalHeight;
-    if (canvas.width !== width) canvas.width = width;
-    if (canvas.height !== height) canvas.height = height;
-    const context = canvas.getContext("2d");
-    paintPhotoComposition(context, assets.source, assets.templateImage, width, height, edit, overlay, campaignTitle);
-    const geometry = getEventOverlayGeometry(context, width, height, overlay, campaignTitle);
-    if (geometry) {
-      context.save();
-      context.strokeStyle = "rgba(255,255,255,.96)";
-      context.lineWidth = Math.max(2, width * .003);
-      context.setLineDash([Math.max(8, width * .012), Math.max(5, width * .007)]);
-      context.strokeRect(geometry.boxX - 5, geometry.boxY - 5, geometry.boxWidth + 10, geometry.boxHeight + 10);
-      context.restore();
-    }
-  }, [assets, edit, overlay, campaignTitle]);
-
-  function canvasPoint(clientX, clientY) {
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    return { x: (clientX - rect.left) * canvas.width / rect.width, y: (clientY - rect.top) * canvas.height / rect.height };
-  }
-  function emitPosition(positionX, positionY) {
-    onChange({ position: "custom", positionX: clamp(positionX, 0, 100), positionY: clamp(positionY, 0, 100) });
-  }
-  function handlePointerDown(event) {
-    const canvas = canvasRef.current;
-    const context = canvas.getContext("2d");
-    const point = canvasPoint(event.clientX, event.clientY);
-    const geometry = getEventOverlayGeometry(context, canvas.width, canvas.height, overlayRef.current, campaignTitle);
-    if (!geometry || point.x < geometry.boxX || point.x > geometry.boxX + geometry.boxWidth || point.y < geometry.boxY || point.y > geometry.boxY + geometry.boxHeight) return;
-    event.currentTarget.focus();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = { pointerId: event.pointerId, point, overlay: overlayRef.current, geometry };
-    setDragging(true);
-  }
-  function handlePointerMove(event) {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const point = canvasPoint(event.clientX, event.clientY);
-    const availableX = Math.max(1, canvasRef.current.width - drag.geometry.marginX * 2 - drag.geometry.boxWidth);
-    const availableY = Math.max(1, canvasRef.current.height - drag.geometry.marginY * 2 - drag.geometry.boxHeight);
-    emitPosition(drag.overlay.positionX + (point.x - drag.point.x) / availableX * 100, drag.overlay.positionY + (point.y - drag.point.y) / availableY * 100);
-  }
-  function handlePointerEnd(event) {
-    if (dragRef.current?.pointerId !== event.pointerId) return;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    dragRef.current = null;
-    setDragging(false);
-  }
-  function handleKeyDown(event) {
-    const step = event.shiftKey ? 4 : 1;
-    const movement = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
-    if (!movement) return;
-    event.preventDefault();
-    emitPosition(overlayRef.current.positionX + movement[0], overlayRef.current.positionY + movement[1]);
-  }
-
-  return <canvas ref={canvasRef} className={clsx("photo-editor-canvas overlay-editor-canvas", dragging && "is-interacting")} tabIndex={0} role="img" aria-label="Interactive event banner position. Drag the banner or use arrow keys to move it." onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerEnd} onPointerCancel={handlePointerEnd} onKeyDown={handleKeyDown} />;
+function updateSuggestedPosition(suggestions, source, position) {
+  const yByPosition = {
+    top: source === "campaign_title" ? 9 : source === "date" ? 21 : 28,
+    middle: source === "campaign_title" ? 42 : source === "date" ? 55 : 62,
+    bottom: source === "campaign_title" ? 69 : source === "date" ? 82 : 88,
+  };
+  const next = (Array.isArray(suggestions) ? suggestions : []).filter((item) => item.source !== source);
+  return [...next, { source, x: 8, y: yByPosition[position] ?? 68, width: 84 }];
 }
 
-function InteractivePhotoCanvas({ media, template, eventOverlay, campaignTitle, onChange }) {
+function ComposedPhotoPreview({ media, template, draft, target, duotone = "none", className }) {
   const canvasRef = useRef(null);
-  const assetsRef = useRef(null);
-  const editRef = useRef(normalizePhotoEdit(media.edit));
-  const pointersRef = useRef(new Map());
-  const gestureRef = useRef(null);
-  const wheelHandlerRef = useRef(null);
-  const [assets, setAssets] = useState(null);
-  const [interacting, setInteracting] = useState(false);
-  const edit = useMemo(() => normalizePhotoEdit(media.edit), [media.edit]);
-  const overlay = useMemo(() => normalizeEventOverlay(eventOverlay), [eventOverlay]);
-
-  useEffect(() => { editRef.current = edit; }, [edit]);
-  useEffect(() => {
-    let active = true;
-    Promise.all([loadBrowserImage(media.src), template?.image ? loadBrowserImage(template.image) : null]).then(([source, templateImage]) => {
-      if (!active) return;
-      const nextAssets = { source, templateImage };
-      assetsRef.current = nextAssets;
-      setAssets(nextAssets);
-    }).catch(() => {});
-    return () => { active = false; };
-  }, [media.src, template?.image]);
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !assets) return;
-    const width = assets.templateImage?.naturalWidth || assets.source.naturalWidth;
-    const height = assets.templateImage?.naturalHeight || assets.source.naturalHeight;
-    if (canvas.width !== width) canvas.width = width;
-    if (canvas.height !== height) canvas.height = height;
-    paintPhotoComposition(canvas.getContext("2d"), assets.source, assets.templateImage, width, height, edit, overlay, campaignTitle);
-  }, [assets, edit, overlay, campaignTitle]);
-
-  function emitEdit(next) {
-    const normalized = normalizePhotoEdit(next);
-    editRef.current = normalized;
-    onChange(normalized);
-  }
-  function canvasPoint(clientX, clientY) {
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    return { x: (clientX - rect.left) * canvas.width / rect.width, y: (clientY - rect.top) * canvas.height / rect.height };
-  }
-  function beginGesture() {
-    const points = [...pointersRef.current.values()];
-    if (points.length >= 2) {
-      const [first, second] = points;
-      const midpoint = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
-      gestureRef.current = { kind: "pinch", distance: Math.hypot(second.x - first.x, second.y - first.y), anchor: canvasPoint(midpoint.x, midpoint.y), edit: editRef.current };
-    } else if (points.length === 1) {
-      gestureRef.current = { kind: "drag", point: points[0], edit: editRef.current };
-    } else gestureRef.current = null;
-  }
-  function handlePointerDown(event) {
-    event.currentTarget.focus();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    setInteracting(true);
-    beginGesture();
-  }
-  function handlePointerMove(event) {
-    if (!pointersRef.current.has(event.pointerId) || !assetsRef.current) return;
-    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    const points = [...pointersRef.current.values()];
-    const gesture = gestureRef.current;
-    const canvas = canvasRef.current;
-    if (points.length >= 2) {
-      if (!gesture || gesture.kind !== "pinch") { beginGesture(); return; }
-      const [first, second] = points;
-      const distance = Math.hypot(second.x - first.x, second.y - first.y);
-      const midpoint = canvasPoint((first.x + second.x) / 2, (first.y + second.y) / 2);
-      const nextZoom = clamp(gesture.edit.zoom * distance / Math.max(gesture.distance, 1), 1, 3);
-      emitEdit(zoomPhotoEditAtAnchor(assetsRef.current.source, canvas.width, canvas.height, gesture.edit, nextZoom, gesture.anchor, midpoint));
-    } else if (points.length === 1 && gesture?.kind === "drag") {
-      const rect = canvas.getBoundingClientRect();
-      const deltaX = (points[0].x - gesture.point.x) * canvas.width / rect.width;
-      const deltaY = (points[0].y - gesture.point.y) * canvas.height / rect.height;
-      emitEdit(panPhotoEditByPixels(assetsRef.current.source, canvas.width, canvas.height, gesture.edit, deltaX, deltaY));
-    }
-  }
-  function handlePointerEnd(event) {
-    pointersRef.current.delete(event.pointerId);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    setInteracting(pointersRef.current.size > 0);
-    beginGesture();
-  }
-  function handleWheel(event) {
-    if (!assetsRef.current) return;
-    event.preventDefault();
-    const canvas = canvasRef.current;
-    const anchor = canvasPoint(event.clientX, event.clientY);
-    const nextZoom = clamp(editRef.current.zoom * Math.exp(-event.deltaY * .0015), 1, 3);
-    emitEdit(zoomPhotoEditAtAnchor(assetsRef.current.source, canvas.width, canvas.height, editRef.current, nextZoom, anchor, anchor));
-  }
-  useEffect(() => { wheelHandlerRef.current = handleWheel; });
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const listener = (event) => wheelHandlerRef.current?.(event);
-    canvas.addEventListener("wheel", listener, { passive: false });
-    return () => canvas.removeEventListener("wheel", listener);
-  }, []);
-  function handleKeyDown(event) {
-    if (!assetsRef.current) return;
-    const canvas = canvasRef.current;
-    const step = event.shiftKey ? 18 : 5;
-    const movement = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
-    if (movement) {
-      event.preventDefault();
-      emitEdit(panPhotoEditByPixels(assetsRef.current.source, canvas.width, canvas.height, editRef.current, movement[0], movement[1]));
-    } else if (["+", "=", "-", "_"].includes(event.key)) {
-      event.preventDefault();
-      const anchor = { x: canvas.width / 2, y: canvas.height / 2 };
-      const amount = ["+", "="].includes(event.key) ? .1 : -.1;
-      emitEdit(zoomPhotoEditAtAnchor(assetsRef.current.source, canvas.width, canvas.height, editRef.current, clamp(editRef.current.zoom + amount, 1, 3), anchor, anchor));
-    }
-  }
-
-  return <canvas ref={canvasRef} className={clsx("photo-editor-canvas", interacting && "is-interacting")} tabIndex={0} role="img" aria-label="Interactive photo crop. Drag to move, scroll or pinch to zoom, and use arrow keys to nudge." onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerEnd} onPointerCancel={handlePointerEnd} onKeyDown={handleKeyDown} />;
-}
-
-function ComposedPhotoPreview({ media, template, eventOverlay, campaignTitle, className }) {
-  const canvasRef = useRef(null);
-  const edit = useMemo(() => normalizePhotoEdit(media?.edit), [media?.edit]);
-  const overlay = useMemo(() => normalizeEventOverlay(eventOverlay), [eventOverlay]);
   useEffect(() => {
     let active = true;
     if (!media?.src) return undefined;
     Promise.all([loadBrowserImage(media.src), template?.image ? loadBrowserImage(template.image) : null]).then(([source, templateImage]) => {
       if (!active || !canvasRef.current) return;
       const canvas = canvasRef.current;
-      canvas.width = templateImage?.naturalWidth || source.naturalWidth;
-      canvas.height = templateImage?.naturalHeight || source.naturalHeight;
-      paintPhotoComposition(canvas.getContext("2d"), source, templateImage, canvas.width, canvas.height, edit, overlay, campaignTitle);
+      canvas.width = templateImage?.naturalWidth || 1080;
+      canvas.height = templateImage?.naturalHeight || 1080;
+      paintPhotoComposition(canvas.getContext("2d"), source, templateImage, canvas.width, canvas.height, media.edit, {
+        layers: draft.textLayers,
+        campaignTitle: draft.title,
+        eventFields: draft.eventFields,
+        target,
+        photoId: media.id,
+        duotone,
+      });
     }).catch(() => {});
     return () => { active = false; };
-  }, [media?.src, template?.image, edit, overlay, campaignTitle]);
-  return <canvas ref={canvasRef} className={className} role="img" aria-label="Edited photo with template and event overlay" />;
+  }, [media, template?.image, draft.textLayers, draft.title, draft.eventFields, target, duotone]);
+  return <canvas ref={canvasRef} className={className} role="img" aria-label={`Composed ${target === "cover" ? "cover page" : "event photo"}`} />;
 }
 
-function FacebookPreview({ draft, settings, template, facebookPage }) {
+function FacebookPreview({ draft, settings, photoTemplate, coverTemplate, facebookPage }) {
+  const [device, setDevice] = useState("mobile");
   const primaryMedia = draft.images[0];
-  const primaryImage = primaryMedia?.src;
   const isVideo = primaryMedia?.type === "video";
+  const items = isVideo ? [] : feedMedia(draft);
+  const primaryTemplate = items[0]?.compositionTarget === "cover" ? coverTemplate : photoTemplate;
+  const orientation = Number(primaryTemplate?.width || 1) > Number(primaryTemplate?.height || 1) * 1.05 ? "landscape" : "square";
+  const layout = facebookLayout(items.length, orientation);
   const pageName = facebookPage?.name || settings.pageName;
   const pagePicture = facebookPage?.picture || "/brand/dilg-logo.png";
   return (
-    <div className="facebook-preview">
-      <div className="fb-post-header"><div className="fb-avatar"><img src={pagePicture} alt="" /></div><div><strong>{pageName}</strong><span>Just now · <span aria-label="Public">🌐</span></span></div><MoreHorizontal size={18} /></div>
-      <div className={clsx("fb-caption", !draft.caption && "placeholder")}>{draft.caption || "Your caption will appear here as you write…"}</div>
-      <div className="fb-media">
-        {isVideo ? <video className="fb-source" src={primaryImage} controls playsInline preload="metadata" /> : primaryImage ? <ComposedPhotoPreview className="fb-source" media={primaryMedia} template={template} eventOverlay={draft.eventOverlay} campaignTitle={draft.title} /> : <div className="fb-empty"><ImagePlus size={28} /><span>Add photos or a video to preview the post</span></div>}
-        {draft.images.length > 1 && <span className="photo-count">+{draft.images.length - 1}</span>}
+    <>
+      <div className="preview-device-switch" aria-label="Preview size"><button className={device === "mobile" ? "active" : ""} onClick={() => setDevice("mobile")}>Mobile</button><button className={device === "desktop" ? "active" : ""} onClick={() => setDevice("desktop")}>Desktop</button></div>
+      <div className={clsx("facebook-preview", `is-${device}`)}>
+        <div className="fb-post-header"><div className="fb-avatar"><img src={pagePicture} alt="" /></div><div><strong>{pageName}</strong><span>Just now · <span aria-label="Public">🌐</span></span></div><MoreHorizontal size={18} /></div>
+        <div className={clsx("fb-caption", !draft.caption && "placeholder")}>{draft.caption || "Your caption will appear here as you write…"}</div>
+        <div className={clsx("fb-media", `layout-${layout.kind}`)}>
+          {isVideo ? <video className="fb-source" src={primaryMedia.src} controls playsInline preload="metadata" /> : items.length ? items.slice(0, layout.visible).map((item, index) => {
+            const isCover = item.compositionTarget === "cover";
+            const media = isCover ? { ...item, edit: draft.cover?.edit || item.edit } : item;
+            return <div className="fb-grid-cell" key={`${item.id}-${index}`}><ComposedPhotoPreview className="fb-source" media={media} template={isCover ? coverTemplate : photoTemplate} draft={draft} target={isCover ? "cover" : "photo"} duotone={isCover ? draft.cover?.duotone : "none"} />{index === layout.visible - 1 && layout.overflow ? <span className="photo-count">+{layout.overflow}</span> : null}</div>;
+          }) : <div className="fb-empty"><ImagePlus size={28} /><span>Add photos or a video to preview the post</span></div>}
+        </div>
+        <div className="fb-layout-disclaimer"><Crop size={14} /> Crop-safe approximation · Facebook may adjust the final layout</div>
+        <div className="fb-engagement"><span>👍 ❤️ <small>24</small></span><span>5 comments · 2 shares</span></div>
+        <div className="fb-actions"><button>👍 Like</button><button><MessageSquareText size={15} /> Comment</button><button>↗ Share</button></div>
       </div>
-      <div className="fb-engagement"><span>👍 ❤️ <small>24</small></span><span>5 comments · 2 shares</span></div>
-      <div className="fb-actions"><button>👍 Like</button><button><MessageSquareText size={15} /> Comment</button><button>↗ Share</button></div>
-    </div>
+    </>
   );
 }
 
@@ -1618,18 +1735,18 @@ async function requestJson(url, options = {}) {
   return payload;
 }
 
-async function renderTemplatedImage(media, templateUrl, eventOverlay, campaignTitle) {
+async function renderComposedImage(media, templateUrl, composition) {
   const [source, template] = await Promise.all([loadBrowserImage(media.src), templateUrl ? loadBrowserImage(templateUrl) : null]);
-  const width = template?.naturalWidth || source.naturalWidth;
-  const height = template?.naturalHeight || source.naturalHeight;
+  const width = template?.naturalWidth || 1080;
+  const height = template?.naturalHeight || 1080;
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  paintPhotoComposition(canvas.getContext("2d"), source, template, width, height, media.edit, eventOverlay, campaignTitle);
-  return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("The post image could not be prepared.")), "image/jpeg", .88));
+  paintPhotoComposition(canvas.getContext("2d"), source, template, width, height, media.edit, composition);
+  return canvasToBlob(canvas, "image/jpeg", .9);
 }
 
-async function renderStoryImage(media, templateUrl, eventOverlay, campaignTitle) {
+async function renderStoryImage(media, templateUrl, composition) {
   const [source, template] = await Promise.all([loadBrowserImage(media.src), templateUrl ? loadBrowserImage(templateUrl) : null]);
   const canvas = document.createElement("canvas");
   canvas.width = 1080;
@@ -1670,18 +1787,27 @@ async function renderStoryImage(media, templateUrl, eventOverlay, campaignTitle)
   context.roundRect(frameX, frameY, frameWidth, frameHeight, 24);
   context.clip();
   context.translate(frameX, frameY);
-  paintPhotoComposition(context, source, template, frameWidth, frameHeight, media.edit, eventOverlay, campaignTitle);
+  paintPhotoComposition(context, source, template, frameWidth, frameHeight, media.edit, composition);
   context.restore();
 
-  return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("The Story image could not be prepared.")), "image/jpeg", .9));
+  return canvasToBlob(canvas, "image/jpeg", .9);
 }
 
-function paintPhotoComposition(context, source, template, width, height, edit, eventOverlay, campaignTitle) {
+function paintPhotoComposition(context, source, template, width, height, edit, composition = {}) {
   context.fillStyle = "#ffffff";
   context.fillRect(0, 0, width, height);
-  drawEditedImageCover(context, source, 0, 0, width, height, edit);
+  if (composition.duotone && composition.duotone !== "none") {
+    const filtered = document.createElement("canvas");
+    filtered.width = Math.max(1, Math.round(width));
+    filtered.height = Math.max(1, Math.round(height));
+    drawEditedImageCover(filtered.getContext("2d"), source, 0, 0, filtered.width, filtered.height, edit);
+    applyDuotone(filtered, composition.duotone);
+    context.drawImage(filtered, 0, 0, width, height);
+  } else {
+    drawEditedImageCover(context, source, 0, 0, width, height, edit);
+  }
   if (template) context.drawImage(template, 0, 0, width, height);
-  drawEventOverlay(context, width, height, eventOverlay, campaignTitle);
+  drawTextLayers(context, width, height, composition);
 }
 
 function drawEditedImageCover(context, image, x, y, width, height, editValue) {
@@ -1700,36 +1826,6 @@ function getPhotoGeometry(image, width, height, editValue, x = 0, y = 0) {
   const drawX = x + (width - drawWidth) * (edit.positionX / 100);
   const drawY = y + (height - drawHeight) * (edit.positionY / 100);
   return { source, drawWidth, drawHeight, drawX, drawY };
-}
-
-function panPhotoEditByPixels(image, width, height, editValue, deltaX, deltaY) {
-  const edit = normalizePhotoEdit(editValue);
-  const geometry = getPhotoGeometry(image, width, height, edit);
-  const overflowX = Math.max(0, geometry.drawWidth - width);
-  const overflowY = Math.max(0, geometry.drawHeight - height);
-  return normalizePhotoEdit({
-    ...edit,
-    positionX: overflowX > .5 ? (-(geometry.drawX + deltaX) / overflowX) * 100 : 50,
-    positionY: overflowY > .5 ? (-(geometry.drawY + deltaY) / overflowY) * 100 : 50,
-  });
-}
-
-function zoomPhotoEditAtAnchor(image, width, height, editValue, nextZoom, anchorFrom, anchorTo) {
-  const edit = normalizePhotoEdit(editValue);
-  const current = getPhotoGeometry(image, width, height, edit);
-  const sourceX = (anchorFrom.x - current.drawX) / current.drawWidth;
-  const sourceY = (anchorFrom.y - current.drawY) / current.drawHeight;
-  const next = normalizePhotoEdit({ ...edit, zoom: nextZoom });
-  const nextGeometry = getPhotoGeometry(image, width, height, next);
-  const overflowX = Math.max(0, nextGeometry.drawWidth - width);
-  const overflowY = Math.max(0, nextGeometry.drawHeight - height);
-  const desiredX = anchorTo.x - sourceX * nextGeometry.drawWidth;
-  const desiredY = anchorTo.y - sourceY * nextGeometry.drawHeight;
-  return normalizePhotoEdit({
-    ...next,
-    positionX: overflowX > .5 ? (-desiredX / overflowX) * 100 : 50,
-    positionY: overflowY > .5 ? (-desiredY / overflowY) * 100 : 50,
-  });
 }
 
 function getRotatedImage(image, rotationValue) {
@@ -1754,67 +1850,57 @@ function getRotatedImage(image, rotationValue) {
   return canvas;
 }
 
-function drawEventOverlay(context, width, height, overlayValue, campaignTitle) {
-  const geometry = getEventOverlayGeometry(context, width, height, overlayValue, campaignTitle);
-  if (!geometry) return;
-  const { boxX, boxY, boxWidth, boxHeight, paddingX, paddingY, stripeHeight, titleSize, titleLineHeight, metaSize, titleLines, meta } = geometry;
-  context.save();
-  context.fillStyle = "rgba(9, 12, 27, .92)";
-  context.beginPath();
-  context.roundRect(boxX, boxY, boxWidth, boxHeight, Math.max(10, width * .012));
-  context.fill();
-  drawBrandStripe(context, boxX, boxY, boxWidth, stripeHeight);
-
-  let textY = boxY + stripeHeight + paddingY + titleSize;
-  context.fillStyle = "#ffffff";
-  context.font = `800 ${titleSize}px Arial, sans-serif`;
-  titleLines.forEach((line) => {
-    context.fillText(line, boxX + paddingX, textY);
-    textY += titleLineHeight;
-  });
-  if (meta) {
-    context.fillStyle = "#f2c94c";
-    context.font = `700 ${metaSize}px Arial, sans-serif`;
-    context.fillText(fitCanvasText(context, meta, boxWidth - paddingX * 2), boxX + paddingX, textY + metaSize * .35);
+function applyDuotone(canvas, mode) {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const samples = [];
+  const stride = Math.max(4, Math.floor(imageData.data.length / 2400 / 4) * 4);
+  for (let index = 0; index < imageData.data.length; index += stride) {
+    samples.push([imageData.data[index], imageData.data[index + 1], imageData.data[index + 2]]);
   }
-  context.restore();
+  const palette = duotonePalette(mode, samples);
+  if (!palette) return;
+  const shadow = hexToRgb(palette.shadow);
+  const highlight = hexToRgb(palette.highlight);
+  for (let index = 0; index < imageData.data.length; index += 4) {
+    const luminance = (imageData.data[index] * .2126 + imageData.data[index + 1] * .7152 + imageData.data[index + 2] * .0722) / 255;
+    imageData.data[index] = shadow[0] + (highlight[0] - shadow[0]) * luminance;
+    imageData.data[index + 1] = shadow[1] + (highlight[1] - shadow[1]) * luminance;
+    imageData.data[index + 2] = shadow[2] + (highlight[2] - shadow[2]) * luminance;
+  }
+  context.putImageData(imageData, 0, 0);
 }
 
-function getEventOverlayGeometry(context, width, height, overlayValue, campaignTitle) {
-  const overlay = normalizeEventOverlay(overlayValue);
-  const title = (overlay.title || campaignTitle || "").trim();
-  const meta = [formatEventDate(overlay.date), overlay.location.trim()].filter(Boolean).join("  ·  ");
-  if (!overlay.enabled || (!title && !meta)) return null;
-
-  const marginX = width * .04;
-  const marginY = height * .045;
-  const boxWidth = width * .72;
-  const paddingX = Math.max(18, width * .032);
-  const paddingY = Math.max(14, width * .018);
-  const stripeHeight = Math.max(7, width * .007);
-  const titleSize = clamp(width * .032, 24, 48);
-  const titleLineHeight = titleSize * 1.1;
-  const metaSize = clamp(titleSize * .48, 14, 22);
-  context.font = `800 ${titleSize}px Arial, sans-serif`;
-  const titleLines = title ? wrapCanvasText(context, title.toUpperCase(), boxWidth - paddingX * 2, 2) : [];
-  const boxHeight = stripeHeight + paddingY * 2 + titleLines.length * titleLineHeight + (meta ? metaSize * 1.45 : 0);
-  const availableX = Math.max(0, width - marginX * 2 - boxWidth);
-  const availableY = Math.max(0, height - marginY * 2 - boxHeight);
-  const boxX = marginX + availableX * overlay.positionX / 100;
-  const boxY = marginY + availableY * overlay.positionY / 100;
-  return { overlay, title, meta, marginX, marginY, boxX, boxY, boxWidth, boxHeight, paddingX, paddingY, stripeHeight, titleSize, titleLineHeight, metaSize, titleLines };
-}
-
-function drawBrandStripe(context, x, y, width, height) {
-  const colors = ["#11113d", "#073166", "#06499a", "#780b10", "#b61925", "#d72d37", "#f29b26", "#ffd51f"];
-  const segment = width / colors.length;
-  colors.forEach((color, index) => {
-    context.fillStyle = color;
-    context.fillRect(x + index * segment, y, segment + 1, height);
+function drawTextLayers(context, width, height, composition) {
+  const layers = Array.isArray(composition.layers) ? composition.layers : [];
+  layers.filter((layer) => layerAppliesTo(layer, composition.target, composition.photoId)).forEach((layer) => {
+    const text = resolveLayerText(layer, composition.campaignTitle, composition.eventFields);
+    if (!text) return;
+    const boxWidth = width * layer.width / 100;
+    const fontSize = width * layer.fontSize / 100;
+    const lineHeight = fontSize * layer.lineHeight;
+    const alignOffset = layer.align === "center" ? boxWidth / 2 : layer.align === "right" ? boxWidth : 0;
+    context.save();
+    context.translate(width * layer.x / 100, height * layer.y / 100);
+    context.rotate((Number(layer.rotation) || 0) * Math.PI / 180);
+    context.font = `${layer.fontWeight || 700} ${fontSize}px ${layer.fontFamily || "Arial"}, sans-serif`;
+    context.textBaseline = "top";
+    context.textAlign = layer.align || "left";
+    context.lineJoin = "round";
+    context.fillStyle = layer.color || "#ffffff";
+    if (layer.outline) {
+      context.strokeStyle = "rgba(0,0,0,.58)";
+      context.lineWidth = Math.max(2, width * .003);
+    }
+    wrapCanvasText(context, text, boxWidth).forEach((line, index) => {
+      if (layer.outline) context.strokeText(line, alignOffset, index * lineHeight, boxWidth);
+      context.fillText(line, alignOffset, index * lineHeight, boxWidth);
+    });
+    context.restore();
   });
 }
 
-function wrapCanvasText(context, text, maxWidth, maxLines) {
+function wrapCanvasText(context, text, maxWidth) {
   const words = String(text).split(/\s+/).filter(Boolean);
   const lines = [];
   let line = "";
@@ -1826,37 +1912,147 @@ function wrapCanvasText(context, text, maxWidth, maxLines) {
     } else line = next;
   });
   if (line) lines.push(line);
-  if (lines.length <= maxLines) return lines;
-  const limited = lines.slice(0, maxLines);
-  let last = limited[maxLines - 1];
-  while (last.length > 1 && context.measureText(`${last}…`).width > maxWidth) last = last.slice(0, -1);
-  limited[maxLines - 1] = `${last.trim()}…`;
-  return limited;
-}
-
-function fitCanvasText(context, text, maxWidth) {
-  if (context.measureText(text).width <= maxWidth) return text;
-  let fitted = text;
-  while (fitted.length > 1 && context.measureText(`${fitted}…`).width > maxWidth) fitted = fitted.slice(0, -1);
-  return `${fitted.trim()}…`;
+  return lines;
 }
 
 async function prepareTemplateImage(file) {
-  if (file.size > 10 * 1024 * 1024) throw new Error("Template is too large");
+  if (file.size > 12 * 1024 * 1024) throw new Error("Template images must be smaller than 12 MB.");
+  return prepareWorkspaceImage(file, 1920, .9);
+}
+
+async function prepareCampaignImage(file) {
+  if (file.size > 12 * 1024 * 1024) throw new Error("Photos must be smaller than 12 MB.");
+  return prepareWorkspaceImage(file, 1800, .88);
+}
+
+async function prepareWorkspaceImage(file, maxDimension, quality) {
   const source = await fileToDataUrl(file);
   const image = await loadBrowserImage(source);
-  const scale = Math.min(1, 1920 / Math.max(image.naturalWidth, image.naturalHeight));
+  const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
   const height = Math.max(1, Math.round(image.naturalHeight * scale));
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   canvas.getContext("2d").drawImage(image, 0, 0, width, height);
+  const blob = await canvasToBlob(canvas, "image/webp", quality);
   return {
-    src: canvas.toDataURL("image/webp", .9),
+    blob,
+    src: canvas.toDataURL("image/webp", quality),
+    width,
+    height,
     size: `${width} × ${height}`,
     ratio: `${(width / height).toFixed(2)}:1`,
   };
+}
+
+async function uploadWorkspaceImage(blob, { id, kind, pageId, officeId, name }) {
+  if (!pageId || !officeId) throw new Error("Choose an approved office and Facebook Page before uploading images.");
+  const extension = blob.type === "image/png" ? "png" : blob.type === "image/jpeg" ? "jpg" : "webp";
+  const filename = `${sanitizeFileName(name || `${kind}.${extension}`).replace(/\.[^.]+$/, "")}.${extension}`;
+  const file = new File([blob], filename, { type: blob.type || "image/webp" });
+  return upload(`office-media/${officeId}/${kind}/${id}-${filename}`, file, {
+    access: "private",
+    handleUploadUrl: "/api/workspace/upload",
+    clientPayload: JSON.stringify({ pageId, kind }),
+  });
+}
+
+async function prepareLocalWorkspaceImport(localStudio, pageId, officeId) {
+  if (!officeId) throw new Error("The approved office could not be identified.");
+  const seenTemplateIds = new Set();
+  const templates = [];
+  for (const sourceTemplate of Array.isArray(localStudio.templates) ? localStudio.templates : []) {
+    if (!sourceTemplate?.id || seenTemplateIds.has(sourceTemplate.id)) continue;
+    seenTemplateIds.add(sourceTemplate.id);
+    const template = { ...sourceTemplate, kind: sourceTemplate.kind === "cover" ? "cover" : "photo" };
+    template.assetUrl = await importWorkspaceAsset(template, { pageId, officeId, kind: "template" });
+    if (!template.assetUrl) continue;
+    templates.push(template);
+  }
+  const seenCampaignIds = new Set();
+  const campaigns = [];
+  for (const sourceCampaign of Array.isArray(localStudio.campaigns) ? localStudio.campaigns : []) {
+    if (!sourceCampaign?.id || seenCampaignIds.has(sourceCampaign.id)) continue;
+    seenCampaignIds.add(sourceCampaign.id);
+    const composition = normalizeCampaignComposition(sourceCampaign);
+    const images = [];
+    const seenMediaIds = new Set();
+    for (const sourceMedia of Array.isArray(sourceCampaign.images) ? sourceCampaign.images : []) {
+      if (!sourceMedia?.id || seenMediaIds.has(sourceMedia.id)) continue;
+      seenMediaIds.add(sourceMedia.id);
+      const media = { ...sourceMedia, edit: normalizePhotoEdit(sourceMedia.edit) };
+      media.assetUrl = await importWorkspaceAsset(media, { pageId, officeId, kind: media.type === "video" ? "video" : "campaign" });
+      if (media.assetUrl) images.push(media);
+    }
+    const cover = { ...composition.cover };
+    if (cover.media) {
+      cover.media = { ...cover.media, edit: normalizePhotoEdit(cover.media.edit) };
+      cover.media.assetUrl = await importWorkspaceAsset(cover.media, { pageId, officeId, kind: "cover" });
+      if (!cover.media.assetUrl) cover.media = null;
+    }
+    campaigns.push({
+      ...sourceCampaign,
+      cover,
+      eventFields: composition.eventFields,
+      textLayers: composition.textLayers,
+      storySourceId: composition.storySourceId,
+      revision: 0,
+      images,
+      eventOverlay: undefined,
+    });
+  }
+  return { templates, campaigns };
+}
+
+function copyCampaignWithNewIds(campaign, now = new Date().toISOString()) {
+  const idMap = new Map();
+  const images = (Array.isArray(campaign.images) ? campaign.images : []).map((item) => {
+    const nextId = createId(item.type === "video" ? "video" : "image");
+    idMap.set(item.id, nextId);
+    return { ...item, id: nextId };
+  });
+  const cover = { ...normalizeCover(campaign.cover) };
+  if (cover.sourceImageId) cover.sourceImageId = idMap.get(cover.sourceImageId) || "";
+  if (cover.media) cover.media = { ...cover.media, id: createId("cover") };
+  return {
+    ...campaign,
+    id: createId("campaign"),
+    title: `${campaign.title} (copy)`,
+    revision: 0,
+    createdAt: now,
+    updatedAt: now,
+    images,
+    cover,
+    storySourceId: campaign.storySourceId === "cover" ? "cover" : idMap.get(campaign.storySourceId) || "",
+    textLayers: (Array.isArray(campaign.textLayers) ? campaign.textLayers : []).map((layer) => ({
+      ...layer,
+      id: createId("text"),
+      photoId: layer.scope === "selected_photo" ? idMap.get(layer.photoId) || "" : "",
+    })),
+  };
+}
+
+async function importWorkspaceAsset(item, { pageId, officeId, kind }) {
+  const existing = String(item.assetUrl || "");
+  if (existing) return existing;
+  const source = String(item.src || item.image || "");
+  if (!source) return "";
+  if (source.startsWith("/") || source.startsWith("http") && item.type === "video") return source;
+  if (!source.startsWith("data:")) return source;
+  const blob = await fetch(source).then((response) => response.blob());
+  const uploaded = await uploadWorkspaceImage(blob, {
+    id: item.id,
+    kind,
+    pageId,
+    officeId,
+    name: item.name || `${item.id}.webp`,
+  });
+  return uploaded.url;
+}
+
+function canvasToBlob(canvas, type = "image/webp", quality = .9) {
+  return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("The image could not be prepared.")), type, quality));
 }
 
 function fileToDataUrl(file) {
@@ -1883,18 +2079,6 @@ function loadBrowserImage(source) {
   return promise;
 }
 
-async function compressImage(file, maxDimension = 1400, quality = 0.8) {
-  if (file.size > 10 * 1024 * 1024) throw new Error("Image is too large");
-  const source = await fileToDataUrl(file);
-  const bitmap = await loadBrowserImage(source);
-  const scale = Math.min(1, maxDimension / Math.max(bitmap.naturalWidth, bitmap.naturalHeight));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(bitmap.naturalWidth * scale));
-  canvas.height = Math.max(1, Math.round(bitmap.naturalHeight * scale));
-  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/jpeg", quality);
-}
-
 function normalizePhotoEdit(value = {}) {
   const input = value && typeof value === "object" ? value : {};
   const rotation = ((Math.round(Number(input.rotation || 0) / 90) * 90) % 360 + 360) % 360;
@@ -1906,36 +2090,13 @@ function normalizePhotoEdit(value = {}) {
   };
 }
 
-function normalizeEventOverlay(value = {}) {
-  const input = value && typeof value === "object" ? value : {};
-  const legacyPosition = input.position === "top" ? "top-left" : input.position === "bottom" ? "bottom-left" : input.position;
-  const positions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"];
-  const presetPositions = {
-    "top-left": [0, 0], "top-center": [50, 0], "top-right": [100, 0],
-    "bottom-left": [0, 100], "bottom-center": [50, 100], "bottom-right": [100, 100],
-  };
-  const resolvedPosition = positions.includes(legacyPosition) ? legacyPosition : DEFAULT_EVENT_OVERLAY.position;
-  const preset = presetPositions[resolvedPosition];
-  return {
-    enabled: Boolean(input.enabled),
-    title: String(input.title || ""),
-    date: String(input.date || ""),
-    location: String(input.location || ""),
-    position: input.position === "custom" ? "custom" : resolvedPosition,
-    positionX: clamp(Number.isFinite(Number(input.positionX)) ? Number(input.positionX) : preset[0], 0, 100),
-    positionY: clamp(Number.isFinite(Number(input.positionY)) ? Number(input.positionY) : preset[1], 0, 100),
-  };
-}
-
-function formatEventDate(value) {
-  if (!value) return "";
-  const parts = String(value).split("-").map(Number);
-  if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return String(value);
-  return new Intl.DateTimeFormat("en-PH", { month: "long", day: "numeric", year: "numeric" }).format(new Date(parts[0], parts[1] - 1, parts[2]));
-}
-
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+function hexToRgb(value) {
+  const hex = String(value || "#000000").replace("#", "");
+  return [0, 2, 4].map((index) => parseInt(hex.slice(index, index + 2), 16) || 0);
 }
 
 function readVideoMetadata(file) {

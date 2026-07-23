@@ -8,7 +8,9 @@ A separate Next.js rebuild of the NAS5 Facebook Poster workflow for DILG offices
 - Node.js runtime for Next.js and the health endpoint
 - Tailwind CSS 4 plus a custom responsive design system
 - Motion for page and composer transitions
-- Browser local storage partitioned by approved staff identity and assigned office Page
+- React Konva direct-manipulation composition editor
+- Office-scoped campaigns, templates, compositions, and image metadata in Neon
+- Private Vercel Blob storage for unpublished photos and office templates
 - Vercel Blob direct uploads for campaign videos
 - Secure Meta OAuth plus Regional Administrator staff approval and office roles
 - Encrypted Page-token storage in Vercel Marketplace Postgres
@@ -27,6 +29,7 @@ Open `http://localhost:3000`.
 
 ```powershell
 npm run lint
+npm test
 npm run build
 ```
 
@@ -54,10 +57,11 @@ FACEBOOK_TOKEN_ENCRYPTION_KEY
 DATABASE_URL or POSTGRES_URL
 FACEBOOK_GRAPH_API_VERSION=v25.0
 BLOB_STORE_ID or BLOB_READ_WRITE_TOKEN
+EDITOR_BLOB_READ_WRITE_TOKEN
 NEXT_PUBLIC_SITE_URL=https://socialmedia-dilg12.vercel.app
 ```
 
-Generate `FACEBOOK_TOKEN_ENCRYPTION_KEY` as a long random secret and never paste it into browser settings. Page access tokens are encrypted with AES-256-GCM before they are stored. The browser receives only Page names, IDs, pictures, and an opaque HttpOnly session cookie. The app creates its two database tables automatically; [the equivalent SQL schema](./db/facebook-connections.sql) is included for administrators and audits.
+Generate `FACEBOOK_TOKEN_ENCRYPTION_KEY` as a long random secret and never paste it into browser settings. Page access tokens are encrypted with AES-256-GCM before they are stored. The browser receives only Page names, IDs, pictures, and an opaque HttpOnly session cookie. The app creates the access, connection, and office-workspace tables automatically; [the equivalent connection SQL schema](./db/facebook-connections.sql) is included for administrators and audits.
 
 Meta may require App Review and Business Verification before people outside the app’s assigned roles can grant these permissions. A person can publish only when both Meta and the server-side Region XII staff directory authorize the same Page. Personal-profile posting is not supported by this Page integration.
 
@@ -67,13 +71,21 @@ Facebook establishes a stable staff identity and proves which Pages that identit
 
 Open **Settings → Staff and office administration** as a Regional Administrator. A newly signed-in employee appears as **Pending** with the Facebook Pages Meta verified for that identity. Select the official office, role, and matching Page, then approve the account. Employees cannot approve themselves, choose an unassigned office, or publish through a Page that is not bound to their membership. If one employee has duties in more than one office, each additional assignment must be added explicitly by a Regional Administrator. All access changes are written to `dilg_access_audit`.
 
-The secure server workflow prepares the selected template on every photo, uploads each photo as unpublished media, then creates one multi-photo Page feed post. A photo My Day/Story uses the first campaign photo in a generated 1080 × 1920 layout. Video campaigns use one MP4, MOV, or WebM file and can publish to the Page Feed, My Day, or both.
+The secure server workflow exports each composition, uploads each image as unpublished media, then creates one ordered multi-photo Page feed post. An optional cover is always attachment 1. The My Day source can be the cover or any event photo and is exported in a generated 1080 × 1920 layout. Video campaigns use one MP4, MOV, or WebM file and can publish to the Page Feed, My Day, or both.
 
-### Photo editing and event overlays
+### Cover pages and direct image editing
 
-Every uploaded photo has non-destructive editing controls for zoom, horizontal and vertical crop position, 90-degree rotation, and reset. The photo editor and Facebook preview render the actual final composition in real time while keeping the selected brand template unchanged.
+Every uploaded photo has non-destructive controls for pan, zoom, crop, 90-degree rotation, and reset. The React Konva editor lets staff select the image or plain text directly, then drag, resize, rotate, wrap, align, recolor, keyboard-nudge, undo, or redo. Office templates remain locked.
 
-Photo campaigns can also enable a shared event-information banner. The event title, date, and location are applied consistently to every campaign photo. Use **Position directly on image** to drag the complete banner anywhere inside the composed template; arrow keys provide precise nudging. The selected coordinates apply to every photo without modifying the photo or template. When the event title is blank, the campaign title is used automatically.
+Campaign title, date, venue, subtitle, and custom text are independent normalized layers. Campaign title is linked live and has no automatic banner, stripe, or background. A layer can target the cover, every event photo, or one selected photo.
+
+Enable **Add a cover page?** to use an event photo or a separate private image. Cover-only office templates can provide suggested text positions, while campaign users can override them. Cover effects include None, Cherry duotone, and deterministic Auto duotone.
+
+### Enable private editor uploads
+
+In Vercel, create a separate **Private Blob** store. Copy its read-write token to a sensitive Production and Preview environment variable named `EDITOR_BLOB_READ_WRITE_TOKEN`, then redeploy. This token is intentionally separate from the public video store and from `FACEBOOK_TOKEN_ENCRYPTION_KEY`.
+
+Private image URLs are never exposed as public assets. The app serves them through authenticated membership-checked asset routes. Viewers can read their office workspace, editors can modify campaigns, publishers can edit and publish, and office administrators can also manage reusable templates.
 
 ### Enable video uploads
 
@@ -85,12 +97,14 @@ Public Blob storage is intentional: Meta must be able to fetch the video URL dur
 
 - Choose **Facebook Feed**, **My Day / Story**, or both in the campaign composer.
 - Feed posts use the campaign caption. My Day does not include the caption.
-- Photo My Day publishing uses the first photo; rearrange photos to select it.
+- Photo My Day publishing uses the cover or event photo selected in the composer.
 - My Day publishes immediately and remains visible on Facebook for 24 hours.
 - Scheduled publishing is available for Feed-only campaigns. A campaign that includes My Day cannot be scheduled through this integration.
 
 ## Data model and security
 
-Workspace records remain device-local but are partitioned under `dilg-social-studio:v1:{account}:{page}`. Switching accounts or Pages loads a separate campaign, template, settings, and activity workspace, preventing one office from seeing or overwriting another office’s local drafts on a shared device. The Settings page can export and restore the current Page workspace. Uploaded photos are resized and compressed before local storage; videos remain in Vercel Blob and the local campaign stores only their public URL and metadata.
+Campaigns, templates, compositions, and image metadata are stored in the office-scoped Neon tables `dilg_campaigns`, `dilg_campaign_media`, and `dilg_templates`. Every read and write resolves the signed-in staff membership and office on the server. Revision checks prevent one employee from silently overwriting another employee’s edit; conflicting saves offer Reload or Save as copy.
+
+Browser storage is retained only as a compatibility cache and one-time import source. The importer deduplicates legacy IDs and removes the old fixed event overlay only after the server import succeeds.
 
 The app never stores or returns Meta Page access tokens in browser storage. Page tokens are encrypted in Postgres and decrypted only inside authenticated Next.js routes. Tokens and account session identifiers are not included in local backups or exports.
