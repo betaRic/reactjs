@@ -10,14 +10,17 @@ import { canManageOfficeTemplates, canWriteCampaign } from "@/lib/workspace-poli
 let workspaceSchemaPromise;
 
 export function getEditorBlobToken() {
-  return clean(process.env.EDITOR_BLOB_READ_WRITE_TOKEN);
+  return clean(
+    process.env.EDITOR_READ_WRITE_TOKEN
+      || process.env.EDITOR_BLOB_READ_WRITE_TOKEN,
+  );
 }
 
 export function getEditorStorageReadiness() {
   const available = Boolean(getEditorBlobToken());
   return {
     available,
-    missing: available ? [] : ["EDITOR_BLOB_READ_WRITE_TOKEN"],
+    missing: available ? [] : ["EDITOR_READ_WRITE_TOKEN"],
   };
 }
 

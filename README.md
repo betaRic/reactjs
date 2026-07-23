@@ -57,7 +57,9 @@ FACEBOOK_TOKEN_ENCRYPTION_KEY
 DATABASE_URL or POSTGRES_URL
 FACEBOOK_GRAPH_API_VERSION=v25.0
 BLOB_STORE_ID or BLOB_READ_WRITE_TOKEN
-EDITOR_BLOB_READ_WRITE_TOKEN
+EDITOR_STORE_ID
+EDITOR_WEBHOOK_PUBLIC_KEY
+EDITOR_READ_WRITE_TOKEN
 NEXT_PUBLIC_SITE_URL=https://socialmedia-dilg12.vercel.app
 ```
 
@@ -83,7 +85,7 @@ Enable **Add a cover page?** to use an event photo or a separate private image. 
 
 ### Enable private editor uploads
 
-In Vercel, create a separate **Private Blob** store. Copy its read-write token to a sensitive Production and Preview environment variable named `EDITOR_BLOB_READ_WRITE_TOKEN`, then redeploy. This token is intentionally separate from the public video store and from `FACEBOOK_TOKEN_ENCRYPTION_KEY`.
+In Vercel, create a separate **Private Blob** store and connect it with the environment-variable prefix `EDITOR`. Vercel supplies `EDITOR_STORE_ID`, `EDITOR_WEBHOOK_PUBLIC_KEY`, and the sensitive `EDITOR_READ_WRITE_TOKEN`; then redeploy. The app also recognizes the older `EDITOR_BLOB_READ_WRITE_TOKEN` name for backward compatibility. This private store is intentionally separate from the public video store and from `FACEBOOK_TOKEN_ENCRYPTION_KEY`.
 
 Private image URLs are never exposed as public assets. The app serves them through authenticated membership-checked asset routes. Viewers can read their office workspace, editors can modify campaigns, publishers can edit and publish, and office administrators can also manage reusable templates.
 

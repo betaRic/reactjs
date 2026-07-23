@@ -1406,7 +1406,7 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, workspac
 
             <section className="composer-section">
               <div className="step-heading"><span>2</span><div><h3>Add photos or a video</h3><p>Use up to {maxEventPhotos} event photos{draft.cover?.enabled ? " plus the cover page" : ""}, or one video.</p></div></div>
-              {!workspaceAccess?.assetStorage?.available && <div className="editor-storage-warning"><ShieldCheck size={17} /><span><strong>Private editor storage is not connected.</strong> Add <code>EDITOR_BLOB_READ_WRITE_TOKEN</code> in Vercel before uploading photos or templates. The existing public video store remains separate.</span></div>}
+              {!workspaceAccess?.assetStorage?.available && <div className="editor-storage-warning"><ShieldCheck size={17} /><span><strong>Private editor storage is not connected.</strong> Add <code>EDITOR_READ_WRITE_TOKEN</code> in Vercel before uploading photos or templates. The existing public video store remains separate.</span></div>}
               <button className="drop-zone" type="button" disabled={uploading} onClick={() => fileRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addMedia(event.dataTransfer.files); }}>
                 <span className="upload-glyph">{uploading ? <CloudUpload className="upload-pulse" size={23} /> : <ImagePlus size={23} />}</span><strong>{uploading ? uploadProgress ? `Uploading video… ${uploadProgress}%` : "Preparing shared media…" : "Drop photos or a video here"}</strong><small>Photos are private to this office · JPG, PNG, WebP · Videos up to 500 MB</small>
               </button>
