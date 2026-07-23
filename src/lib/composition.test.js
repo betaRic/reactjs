@@ -87,4 +87,14 @@ describe("duotone palettes", () => {
     expect(new Set(shadowChannels).size).toBeGreaterThan(1);
     expect(new Set(highlightChannels).size).toBeGreaterThan(1);
   });
+
+  it("uses user-picked colors for Custom duotone", () => {
+    expect(duotonePalette("custom", [[120, 120, 120]], {
+      shadow: "#112233",
+      highlight: "#ddeeff",
+    })).toEqual({
+      shadow: "#112233",
+      highlight: "#ddeeff",
+    });
+  });
 });

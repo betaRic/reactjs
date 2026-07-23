@@ -25,6 +25,7 @@ import {
   createTextLayer,
   duotonePalette,
   layerAppliesTo,
+  normalizeDuotoneColors,
   normalizePhotoEdit,
   normalizeTextLayer,
   resolveLayerText,
@@ -40,10 +41,12 @@ export default function CompositionEditorCanvas({
   eventFields,
   target = "photo",
   duotone = "none",
+  duotoneColors,
   suggestedLayers = [],
   onCampaignTitleChange,
   onEventFieldsChange,
   onDuotoneChange,
+  onDuotoneColorsChange,
   onMediaEdit,
   onLayersChange,
   onClose,
@@ -53,7 +56,12 @@ export default function CompositionEditorCanvas({
   const [localEdit, setLocalEdit] = useState(() => normalizePhotoEdit(media?.edit));
   const [localLayers, setLocalLayers] = useState(() => (layers || []).map(normalizeTextLayer));
   const [selectedId, setSelectedId] = useState("photo");
-  const filteredSource = usePreparedImage(source, target === "cover" ? duotone : "none", localEdit.rotation);
+  const filteredSource = usePreparedImage(
+    source,
+    target === "cover" ? duotone : "none",
+    target === "cover" ? duotoneColors : null,
+    localEdit.rotation,
+  );
   const [gridVisible, setGridVisible] = useState(true);
   const historyRef = useRef([]);
   const futureRef = useRef([]);
@@ -300,7 +308,9 @@ export default function CompositionEditorCanvas({
                 edit={localEdit}
                 target={target}
                 duotone={duotone}
+                duotoneColors={duotoneColors}
                 onDuotoneChange={onDuotoneChange}
+                onDuotoneColorsChange={onDuotoneColorsChange}
                 onChange={commitEdit}
                 onReset={() => commitEdit({ zoom: 1, positionX: 50, positionY: 50, rotation: 0 })}
               />
@@ -403,18 +413,50 @@ function EditableText({ layer, text, canvasWidth, canvasHeight, selected, onSele
   );
 }
 
-function PhotoInspector({ edit, target, duotone, onDuotoneChange, onChange, onReset }) {
+function PhotoInspector({ edit, target, duotone, duotoneColors, onDuotoneChange, onDuotoneColorsChange, onChange, onReset }) {
+  const customColors = normalizeDuotoneColors(duotoneColors);
   return (
     <div className="inspector-stack">
       <div className="inspector-heading"><ImageIcon size={18} /><div><strong>Photo</strong><span>Move and crop the background image</span></div></div>
       {target === "cover" && (
         <div className="duotone-inspector">
-          <div><strong>Cover effect</strong><span>Choose an effect and see it immediately.</span></div>
-          <div className="duotone-options" role="group" aria-label="Cover color effect">
+          <div><strong>Cover effect</strong><span>Choose an effect or build your own color pair.</span></div>
+          <div className="duotone-options four-up" role="group" aria-label="Cover color effect">
             <button type="button" className={duotone === "cherry" ? "active" : ""} aria-pressed={duotone === "cherry"} onClick={() => onDuotoneChange?.("cherry")}><i className="cherry" /><span>Cherry</span></button>
             <button type="button" className={duotone === "auto" ? "active" : ""} aria-pressed={duotone === "auto"} onClick={() => onDuotoneChange?.("auto")}><i className="auto" /><span>Auto</span></button>
+            <button
+              type="button"
+              className={duotone === "custom" ? "active" : ""}
+              aria-pressed={duotone === "custom"}
+              onClick={() => onDuotoneChange?.("custom")}
+            >
+              <i className="custom" style={{ background: `linear-gradient(135deg, ${customColors.shadow}, ${customColors.highlight})` }} />
+              <span>Custom</span>
+            </button>
             <button type="button" className={duotone === "none" ? "active" : ""} aria-pressed={duotone === "none"} onClick={() => onDuotoneChange?.("none")}><i className="none" /><span>Original</span></button>
           </div>
+          {duotone === "custom" && (
+            <div className="inspector-two-columns">
+              <label className="inspector-field">
+                <span>Shadow color</span>
+                <input
+                  className="color-input"
+                  type="color"
+                  value={customColors.shadow}
+                  onChange={(event) => onDuotoneColorsChange?.({ ...customColors, shadow: event.target.value })}
+                />
+              </label>
+              <label className="inspector-field">
+                <span>Highlight color</span>
+                <input
+                  className="color-input"
+                  type="color"
+                  value={customColors.highlight}
+                  onChange={(event) => onDuotoneColorsChange?.({ ...customColors, highlight: event.target.value })}
+                />
+              </label>
+            </div>
+          )}
         </div>
       )}
       <div className="inspector-tool-row">
@@ -513,7 +555,7 @@ function useLoadedImage(source) {
   return loaded.source === source ? loaded.image : null;
 }
 
-function usePreparedImage(source, mode, rotation) {
+function usePreparedImage(source, mode, customColors, rotation) {
   const [prepared, setPrepared] = useState({ source: null, mode: "", rotation: 0, image: null });
   const needsPreparation = Boolean(source && (mode !== "none" || rotation));
   useEffect(() => {
@@ -542,7 +584,7 @@ function usePreparedImage(source, mode, rotation) {
     const samples = [];
     const stride = Math.max(4, Math.floor(data.data.length / 2000 / 4) * 4);
     for (let index = 0; index < data.data.length; index += stride) samples.push([data.data[index], data.data[index + 1], data.data[index + 2]]);
-    const palette = duotonePalette(mode, samples);
+    const palette = duotonePalette(mode, samples, customColors);
     const shadow = hexToRgb(palette.shadow);
     const highlight = hexToRgb(palette.highlight);
     for (let index = 0; index < data.data.length; index += 4) {
@@ -556,7 +598,7 @@ function usePreparedImage(source, mode, rotation) {
     next.onload = () => active && setPrepared({ source, mode, rotation, image: next });
     next.src = canvas.toDataURL("image/jpeg", 0.9);
     return () => { active = false; };
-  }, [source, mode, rotation, needsPreparation]);
+  }, [source, mode, customColors, rotation, needsPreparation]);
   if (!needsPreparation) return source;
   return prepared.source === source && prepared.mode === mode && prepared.rotation === rotation ? prepared.image : null;
 }

@@ -1,11 +1,13 @@
 export const DEFAULT_PHOTO_EDIT = Object.freeze({ zoom: 1, positionX: 50, positionY: 50, rotation: 0 });
 export const DEFAULT_EVENT_FIELDS = Object.freeze({ date: "", venue: "", subtitle: "" });
+export const DEFAULT_DUOTONE_COLORS = Object.freeze({ shadow: "#230710", highlight: "#f35369" });
 export const DEFAULT_COVER = Object.freeze({
   enabled: false,
   sourceMode: "existing",
   sourceImageId: "",
   templateId: "",
   duotone: "cherry",
+  duotoneColors: DEFAULT_DUOTONE_COLORS,
   media: null,
   edit: DEFAULT_PHOTO_EDIT,
 });
@@ -80,7 +82,8 @@ export function normalizeCover(value = {}) {
     sourceMode: input.sourceMode === "upload" ? "upload" : "existing",
     sourceImageId: String(input.sourceImageId || ""),
     templateId: String(input.templateId || ""),
-    duotone: ["none", "cherry", "auto"].includes(input.duotone) ? input.duotone : "cherry",
+    duotone: ["none", "cherry", "auto", "custom"].includes(input.duotone) ? input.duotone : "cherry",
+    duotoneColors: normalizeDuotoneColors(input.duotoneColors),
     edit: normalizePhotoEdit(input.edit),
     media: input.media && typeof input.media === "object"
       ? { ...input.media, type: "image", edit: normalizePhotoEdit(input.media.edit) }
@@ -148,9 +151,16 @@ export function facebookLayout(count, orientation = "square") {
   return { kind: "four-grid", visible: 4, overflow: count - 4 };
 }
 
-export function duotonePalette(mode, pixels = []) {
+export function normalizeDuotoneColors(value = {}) {
+  const shadow = validColor(value?.shadow) ? String(value.shadow).toLowerCase() : DEFAULT_DUOTONE_COLORS.shadow;
+  const highlight = validColor(value?.highlight) ? String(value.highlight).toLowerCase() : DEFAULT_DUOTONE_COLORS.highlight;
+  return { shadow, highlight };
+}
+
+export function duotonePalette(mode, pixels = [], customColors) {
   if (mode === "none") return null;
   if (mode === "cherry") return { shadow: "#230710", highlight: "#f35369" };
+  if (mode === "custom") return normalizeDuotoneColors(customColors);
   const sample = Array.isArray(pixels) ? pixels : [];
   if (!sample.length) return { shadow: "#101b35", highlight: "#5fc8d9" };
   let red = 0;

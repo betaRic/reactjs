@@ -417,6 +417,7 @@ export default function StudioApp() {
                 target: isCover ? "cover" : "photo",
                 photoId: media.id,
                 duotone: isCover ? draft.cover?.duotone : "none",
+                duotoneColors: isCover ? draft.cover?.duotoneColors : null,
               });
               const form = new FormData();
               form.set("photo", photo, `campaign-photo-${String(index + 1).padStart(2, "0")}.jpg`);
@@ -457,6 +458,7 @@ export default function StudioApp() {
               target: isCover ? "cover" : "photo",
               photoId: sourceMedia.id,
               duotone: isCover ? draft.cover?.duotone : "none",
+              duotoneColors: isCover ? draft.cover?.duotoneColors : null,
             });
             const form = new FormData();
             form.set("photo", storyPhoto, "campaign-story.jpg");
@@ -1235,7 +1237,7 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, workspac
   const defaultLocation = publishingIdentity.replace(/^DILG\s*/i, "").trim() || "Region XII";
 
   function updateCover(changes) {
-    setDraft((current) => ({ ...current, cover: { ...normalizeCover(current.cover), ...changes } }));
+    setDraft((current) => ({ ...current, cover: normalizeCover({ ...normalizeCover(current.cover), ...changes }) }));
   }
   function updateEventFields(changes) {
     setDraft((current) => ({ ...current, eventFields: { ...DEFAULT_EVENT_FIELDS, ...current.eventFields, ...changes } }));
@@ -1468,7 +1470,7 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, workspac
       </motion.section>
       <AnimatePresence>
         {editingImage && <CompositionEditor key={`photo-${editingImage.id}`} media={editingImage} template={activeTemplate} layers={draft.textLayers} campaignTitle={draft.title} eventFields={draft.eventFields} target="photo" onCampaignTitleChange={(title) => setDraft((current) => ({ ...current, title }))} onEventFieldsChange={(eventFields) => setDraft((current) => ({ ...current, eventFields }))} onMediaEdit={(edit) => updatePhotoEdit(editingImage.id, edit)} onLayersChange={(textLayers) => setDraft((current) => ({ ...current, textLayers }))} onClose={() => setEditingImageId(null)} />}
-        {editingCover && coverMedia && <CompositionEditor key={`cover-${coverMedia.id}`} media={{ ...coverMedia, edit: draft.cover?.edit || coverMedia.edit }} template={activeCoverTemplate} layers={draft.textLayers} campaignTitle={draft.title} eventFields={draft.eventFields} target="cover" duotone={draft.cover?.duotone} suggestedLayers={activeCoverTemplate?.suggestedLayers} onCampaignTitleChange={(title) => setDraft((current) => ({ ...current, title }))} onEventFieldsChange={(eventFields) => setDraft((current) => ({ ...current, eventFields }))} onDuotoneChange={(duotone) => updateCover({ duotone })} onMediaEdit={(edit) => updateCover({ edit })} onLayersChange={(textLayers) => setDraft((current) => ({ ...current, textLayers }))} onClose={() => setEditingCover(false)} />}
+        {editingCover && coverMedia && <CompositionEditor key={`cover-${coverMedia.id}`} media={{ ...coverMedia, edit: draft.cover?.edit || coverMedia.edit }} template={activeCoverTemplate} layers={draft.textLayers} campaignTitle={draft.title} eventFields={draft.eventFields} target="cover" duotone={draft.cover?.duotone} duotoneColors={draft.cover?.duotoneColors} suggestedLayers={activeCoverTemplate?.suggestedLayers} onCampaignTitleChange={(title) => setDraft((current) => ({ ...current, title }))} onEventFieldsChange={(eventFields) => setDraft((current) => ({ ...current, eventFields }))} onDuotoneChange={(duotone) => updateCover({ duotone })} onDuotoneColorsChange={(duotoneColors) => updateCover({ duotoneColors })} onMediaEdit={(edit) => updateCover({ edit })} onLayersChange={(textLayers) => setDraft((current) => ({ ...current, textLayers }))} onClose={() => setEditingCover(false)} />}
       </AnimatePresence>
     </motion.div>
   );
@@ -1490,7 +1492,7 @@ function updateSuggestedPosition(suggestions, source, position) {
   return [...next, { source, x: 8, y: yByPosition[position] ?? 68, width: 84 }];
 }
 
-function ComposedPhotoPreview({ media, template, draft, target, duotone = "none", className }) {
+function ComposedPhotoPreview({ media, template, draft, target, duotone = "none", duotoneColors, className }) {
   const canvasRef = useRef(null);
   useEffect(() => {
     let active = true;
@@ -1507,10 +1509,11 @@ function ComposedPhotoPreview({ media, template, draft, target, duotone = "none"
         target,
         photoId: media.id,
         duotone,
+        duotoneColors,
       });
     }).catch(() => {});
     return () => { active = false; };
-  }, [media, template?.image, draft.textLayers, draft.title, draft.eventFields, target, duotone]);
+  }, [media, template?.image, draft.textLayers, draft.title, draft.eventFields, target, duotone, duotoneColors]);
   return <canvas ref={canvasRef} className={className} role="img" aria-label={`Composed ${target === "cover" ? "cover page" : "event photo"}`} />;
 }
 
@@ -1534,7 +1537,7 @@ function FacebookPreview({ draft, settings, photoTemplate, coverTemplate, facebo
           {isVideo ? <video className="fb-source" src={primaryMedia.src} controls playsInline preload="metadata" /> : items.length ? items.slice(0, layout.visible).map((item, index) => {
             const isCover = item.compositionTarget === "cover";
             const media = isCover ? { ...item, edit: draft.cover?.edit || item.edit } : item;
-            return <div className="fb-grid-cell" key={`${item.id}-${index}`}><ComposedPhotoPreview className="fb-source" media={media} template={isCover ? coverTemplate : photoTemplate} draft={draft} target={isCover ? "cover" : "photo"} duotone={isCover ? draft.cover?.duotone : "none"} />{index === layout.visible - 1 && layout.overflow ? <span className="photo-count">+{layout.overflow}</span> : null}</div>;
+            return <div className="fb-grid-cell" key={`${item.id}-${index}`}><ComposedPhotoPreview className="fb-source" media={media} template={isCover ? coverTemplate : photoTemplate} draft={draft} target={isCover ? "cover" : "photo"} duotone={isCover ? draft.cover?.duotone : "none"} duotoneColors={isCover ? draft.cover?.duotoneColors : null} />{index === layout.visible - 1 && layout.overflow ? <span className="photo-count">+{layout.overflow}</span> : null}</div>;
           }) : <div className="fb-empty"><ImagePlus size={28} /><span>Add photos or a video to preview the post</span></div>}
         </div>
         <div className="fb-layout-disclaimer"><Crop size={14} /> Crop-safe approximation · Facebook may adjust the final layout</div>
@@ -1759,7 +1762,7 @@ function paintPhotoComposition(context, source, template, width, height, edit, c
     filtered.width = Math.max(1, Math.round(width));
     filtered.height = Math.max(1, Math.round(height));
     drawEditedImageCover(filtered.getContext("2d"), source, 0, 0, filtered.width, filtered.height, edit);
-    applyDuotone(filtered, composition.duotone);
+    applyDuotone(filtered, composition.duotone, composition.duotoneColors);
     context.drawImage(filtered, 0, 0, width, height);
   } else {
     drawEditedImageCover(context, source, 0, 0, width, height, edit);
@@ -1808,7 +1811,7 @@ function getRotatedImage(image, rotationValue) {
   return canvas;
 }
 
-function applyDuotone(canvas, mode) {
+function applyDuotone(canvas, mode, customColors) {
   const context = canvas.getContext("2d", { willReadFrequently: true });
   const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
   const samples = [];
@@ -1816,7 +1819,7 @@ function applyDuotone(canvas, mode) {
   for (let index = 0; index < imageData.data.length; index += stride) {
     samples.push([imageData.data[index], imageData.data[index + 1], imageData.data[index + 2]]);
   }
-  const palette = duotonePalette(mode, samples);
+  const palette = duotonePalette(mode, samples, customColors);
   if (!palette) return;
   const shadow = hexToRgb(palette.shadow);
   const highlight = hexToRgb(palette.highlight);
