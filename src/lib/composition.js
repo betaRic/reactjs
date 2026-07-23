@@ -166,10 +166,10 @@ export function duotonePalette(mode, pixels = []) {
   }
   if (!count) return { shadow: "#101b35", highlight: "#5fc8d9" };
   const average = [red / count, green / count, blue / count];
-  const max = Math.max(...average, 1);
-  const normalized = average.map((channel) => channel / max);
-  const shadow = normalized.map((channel) => Math.round(10 + channel * 35));
-  const highlight = normalized.map((channel) => Math.round(145 + channel * 95));
+  const sourceColor = rgbToHsl(average);
+  const hue = sourceColor.saturation < 0.12 ? 210 : sourceColor.hue;
+  const shadow = hslToRgb(hue, 0.62, 0.12);
+  const highlight = hslToRgb((hue + 18) % 360, 0.72, 0.7);
   return { shadow: rgbToHex(shadow), highlight: rgbToHex(highlight) };
 }
 
@@ -250,6 +250,37 @@ function validColor(value) {
 
 function rgbToHex(rgb) {
   return `#${rgb.map((channel) => clamp(Math.round(channel), 0, 255).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function rgbToHsl([red, green, blue]) {
+  const channels = [red, green, blue].map((value) => clamp(value / 255, 0, 1));
+  const maximum = Math.max(...channels);
+  const minimum = Math.min(...channels);
+  const delta = maximum - minimum;
+  const lightness = (maximum + minimum) / 2;
+  if (!delta) return { hue: 0, saturation: 0, lightness };
+  const saturation = delta / (1 - Math.abs(2 * lightness - 1));
+  let hue = maximum === channels[0]
+    ? ((channels[1] - channels[2]) / delta) % 6
+    : maximum === channels[1]
+      ? (channels[2] - channels[0]) / delta + 2
+      : (channels[0] - channels[1]) / delta + 4;
+  hue = (hue * 60 + 360) % 360;
+  return { hue, saturation, lightness };
+}
+
+function hslToRgb(hue, saturation, lightness) {
+  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+  const segment = hue / 60;
+  const second = chroma * (1 - Math.abs(segment % 2 - 1));
+  const [red, green, blue] = segment < 1 ? [chroma, second, 0]
+    : segment < 2 ? [second, chroma, 0]
+      : segment < 3 ? [0, chroma, second]
+        : segment < 4 ? [0, second, chroma]
+          : segment < 5 ? [second, 0, chroma]
+            : [chroma, 0, second];
+  const match = lightness - chroma / 2;
+  return [red, green, blue].map((value) => (value + match) * 255);
 }
 
 function clamp(value, minimum, maximum) {

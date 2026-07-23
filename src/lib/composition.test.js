@@ -79,4 +79,12 @@ describe("duotone palettes", () => {
     expect(duotonePalette("auto", sample)).toEqual(duotonePalette("auto", sample));
     expect(duotonePalette("auto", sample).shadow).toMatch(/^#[0-9a-f]{6}$/);
   });
+
+  it("keeps Auto duotone colorful for neutral photographs", () => {
+    const palette = duotonePalette("auto", [[120, 120, 120], [210, 210, 210]]);
+    const shadowChannels = palette.shadow.match(/[0-9a-f]{2}/gi);
+    const highlightChannels = palette.highlight.match(/[0-9a-f]{2}/gi);
+    expect(new Set(shadowChannels).size).toBeGreaterThan(1);
+    expect(new Set(highlightChannels).size).toBeGreaterThan(1);
+  });
 });

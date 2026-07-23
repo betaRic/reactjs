@@ -59,7 +59,6 @@ import { clsx } from "clsx";
 import AccessAdministration from "@/components/access-administration";
 import CompositionEditor from "@/components/composition-editor";
 import {
-  createTextLayer,
   DEFAULT_COVER,
   DEFAULT_EVENT_FIELDS,
   duotonePalette,
@@ -1223,8 +1222,6 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, workspac
   const [draggedImageId, setDraggedImageId] = useState(null);
   const [editingImageId, setEditingImageId] = useState(null);
   const [editingCover, setEditingCover] = useState(false);
-  const [focusLayerId, setFocusLayerId] = useState("");
-  const [customText, setCustomText] = useState("");
   const photoTemplates = templates.filter((item) => (item.kind || "photo") === "photo");
   const coverTemplates = templates.filter((item) => item.kind === "cover");
   const activeTemplate = photoTemplates.find((item) => item.id === draft.templateId) || null;
@@ -1242,26 +1239,6 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, workspac
   }
   function updateEventFields(changes) {
     setDraft((current) => ({ ...current, eventFields: { ...DEFAULT_EVENT_FIELDS, ...current.eventFields, ...changes } }));
-  }
-  function openLayer(source, text = "") {
-    let layer = draft.textLayers.find((item) => item.source === source);
-    if (!layer) {
-      const scope = draft.cover?.enabled ? "cover" : "all_photos";
-      layer = createTextLayer(source, scope);
-      if (source === "custom") layer.text = text || "Custom text";
-      const suggestion = scope === "cover" ? activeCoverTemplate?.suggestedLayers?.find((item) => item.source === source) : null;
-      if (suggestion) layer = { ...layer, ...suggestion, id: layer.id, source, scope };
-      setDraft((current) => ({ ...current, textLayers: [...current.textLayers, layer] }));
-    }
-    setFocusLayerId(layer.id);
-    if (layer.scope === "cover") {
-      if (!coverMedia) return toast.info("Choose a cover image before placing this text.");
-      setEditingCover(true);
-    } else {
-      const targetId = layer.scope === "selected_photo" ? layer.photoId : draft.images.find((item) => item.type !== "video")?.id;
-      if (!targetId) return toast.info("Add a photo before placing this text.");
-      setEditingImageId(targetId);
-    }
   }
   async function addMedia(files) {
     const selected = [...files];
@@ -1397,11 +1374,8 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, workspac
         <div className="composer-body">
           <div className="composer-form">
             <section className="composer-section">
-              <div className="step-heading"><span>1</span><div><h3>Campaign details</h3><p>The Campaign title can also become a live, plain-text design layer.</p></div></div>
-              <div className="linked-title-field">
-                <Field label="Campaign title"><input value={draft.title} maxLength={160} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Barangay Assembly Highlights" autoFocus /></Field>
-                <button className="secondary-button add-design-text" type="button" onClick={() => openLayer("campaign_title")}><TypeIcon /> {draft.textLayers.some((item) => item.source === "campaign_title") ? "Edit title in design" : "Add title to design"}</button>
-              </div>
+              <div className="step-heading"><span>1</span><div><h3>Campaign details</h3><p>Name the campaign so your team can find it quickly.</p></div></div>
+              <Field label="Campaign title"><input value={draft.title} maxLength={160} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="e.g. Barangay Assembly Highlights" autoFocus /></Field>
             </section>
 
             <section className="composer-section">
@@ -1419,7 +1393,7 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, workspac
                       <motion.div layout className={clsx("image-thumb", draggedImageId === image.id && "is-dragging")} key={image.id} draggable onDragStart={(event) => { setDraggedImageId(image.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", image.id); }} onDragEnd={() => setDraggedImageId(null)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); placeImageBefore(event.dataTransfer.getData("text/plain") || draggedImageId, image.id); setDraggedImageId(null); }}>
                         {image.type === "video" ? <video src={image.src} muted playsInline preload="metadata" aria-label={image.name} /> : <img src={image.src} alt={image.name} />}
                         {index === 0 && !hasVideo && <span className="cover-badge">Photo 1</span>}
-                        {image.type !== "video" && <button type="button" className="edit-photo-button" onClick={() => { setFocusLayerId(""); setEditingImageId(image.id); }} aria-label={`Edit ${image.name}`}><Crop size={14} /> Edit</button>}
+                        {image.type !== "video" && <button type="button" className="edit-photo-button" onClick={() => setEditingImageId(image.id)} aria-label={`Edit ${image.name}`}><Crop size={14} /> Edit</button>}
                         <div className="media-position" title="Drag to rearrange"><GripVertical size={14} /><span>{index + 1}</span></div>
                         <div className="media-controls"><button type="button" onClick={() => moveImage(image.id, -1)} disabled={index === 0} aria-label={`Move ${image.name} left`}><ChevronLeft size={15} /></button><button type="button" onClick={() => moveImage(image.id, 1)} disabled={index === draft.images.length - 1} aria-label={`Move ${image.name} right`}><ChevronRight size={15} /></button><button type="button" className="remove-media" onClick={() => removeImage(image.id)} aria-label={`Remove ${image.name}`}><X size={15} /></button></div>
                       </motion.div>
@@ -1446,27 +1420,24 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, workspac
                     ) : (
                       <div><button className="secondary-button" type="button" onClick={() => coverFileRef.current?.click()}><Upload size={17} /> {draft.cover.media ? "Replace cover image" : "Upload cover image"}</button><input ref={coverFileRef} hidden type="file" accept="image/*" onChange={(event) => { addCoverFile(event.target.files?.[0]); event.target.value = ""; }} />{draft.cover.media && <small className="selected-cover-name">{draft.cover.media.name}</small>}</div>
                     )}
-                    <div className="form-grid two-columns">
-                      <Field label="Cover template"><select value={draft.cover.templateId} onChange={(event) => updateCover({ templateId: event.target.value })}><option value="">Blank square</option>{coverTemplates.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></Field>
-                      <Field label="Cover color effect"><select value={draft.cover.duotone} onChange={(event) => updateCover({ duotone: event.target.value })}><option value="cherry">Cherry duotone</option><option value="auto">Auto duotone</option><option value="none">None</option></select></Field>
-                    </div>
+                    <Field label="Cover template"><select value={draft.cover.templateId} onChange={(event) => updateCover({ templateId: event.target.value })}><option value="">Blank square</option>{coverTemplates.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></Field>
                     {activeCoverTemplate && !isSquareTemplate(activeCoverTemplate) && <div className="crop-warning"><Crop size={16} /> This cover template is not square. Facebook may crop it differently across devices.</div>}
-                    <button className="primary-button edit-cover-button" type="button" disabled={!coverMedia} onClick={() => { setFocusLayerId(""); setEditingCover(true); }}><WandSparkles size={17} /> Edit cover directly</button>
+                    <button className="primary-button edit-cover-button" type="button" disabled={!coverMedia} onClick={() => setEditingCover(true)}><WandSparkles size={17} /> Edit cover design</button>
+                    <small className="cover-editor-hint">Crop, duotone, title, date, venue, subtitle, and custom text are all handled inside the cover editor.</small>
                   </motion.div>
                 )}
               </div>
             </section>
 
             <section className="composer-section">
-              <div className="step-heading"><span>3</span><div><h3>Caption and design text</h3><p>Each detail is its own movable text layer. No background or decoration is added automatically.</p></div></div>
+              <div className="step-heading"><span>3</span><div><h3>Caption and event details</h3><p>Enter the information once. Choose what appears on an image while editing that image.</p></div></div>
               <Field label="Post copy" hint={`${draft.caption.length} / 2,200`}><textarea rows={7} value={draft.caption} onChange={(event) => setDraft({ ...draft, caption: event.target.value.slice(0, 2200) })} placeholder="Share the story behind this update…" /></Field>
               <div className="caption-tools"><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}${organizationHashtag} #SerbisyongMatino` })}># Add hashtags</button><button onClick={() => setDraft({ ...draft, caption: `${draft.caption}${draft.caption ? "\n\n" : ""}📍 ${defaultLocation}` })}>Add location</button></div>
               {!hasVideo && (
                 <div className="structured-text-panel">
-                  <StructuredTextField label="Date" type="date" value={draft.eventFields?.date || ""} onChange={(value) => updateEventFields({ date: value })} added={draft.textLayers.some((item) => item.source === "date")} onAdd={() => openLayer("date")} />
-                  <StructuredTextField label="Venue" value={draft.eventFields?.venue || ""} placeholder={`e.g. ${defaultLocation}`} onChange={(value) => updateEventFields({ venue: value })} added={draft.textLayers.some((item) => item.source === "venue")} onAdd={() => openLayer("venue")} />
-                  <StructuredTextField label="Subtitle" value={draft.eventFields?.subtitle || ""} placeholder="Optional event description" onChange={(value) => updateEventFields({ subtitle: value })} added={draft.textLayers.some((item) => item.source === "subtitle")} onAdd={() => openLayer("subtitle")} />
-                  <div className="custom-text-row"><Field label="Custom text"><input value={customText} maxLength={240} onChange={(event) => setCustomText(event.target.value)} placeholder="Add another independent text layer" /></Field><button className="secondary-button" type="button" disabled={!customText.trim()} onClick={() => { openLayer("custom", customText.trim()); setCustomText(""); }}><Plus size={17} /> Add to design</button></div>
+                  <Field label="Date"><input type="date" value={draft.eventFields?.date || ""} onChange={(event) => updateEventFields({ date: event.target.value })} /></Field>
+                  <Field label="Venue"><input value={draft.eventFields?.venue || ""} placeholder={`e.g. ${defaultLocation}`} onChange={(event) => updateEventFields({ venue: event.target.value })} /></Field>
+                  <Field label="Subtitle"><input value={draft.eventFields?.subtitle || ""} placeholder="Optional event description" onChange={(event) => updateEventFields({ subtitle: event.target.value })} /></Field>
                 </div>
               )}
             </section>
@@ -1496,23 +1467,10 @@ function Composer({ draft, setDraft, templates, settings, facebookPage, workspac
         <footer className="composer-footer"><div className="composer-save-area"><button className="text-button" onClick={onSave} disabled={publishing}>Save draft</button>{publishing && <span className="publish-progress"><Loader2 className="spin" size={15} /> {publishProgress}</span>}</div><div><button className="secondary-button" onClick={onReview} disabled={publishing}><BadgeCheck size={17} /> Submit for review</button><button className="primary-button" onClick={onPublish} disabled={publishing || !canPublish} title={canPublish ? "" : "Your office role does not allow publishing"}>{publishing ? <Loader2 className="spin" size={17} /> : <Send size={17} />} {publishing ? "Publishing…" : canPublish ? draft.scheduledFor ? "Schedule on Facebook" : "Publish to Facebook" : "Publishing restricted"}</button></div></footer>
       </motion.section>
       <AnimatePresence>
-        {editingImage && <CompositionEditor key={`photo-${editingImage.id}-${focusLayerId}`} media={editingImage} template={activeTemplate} layers={draft.textLayers} campaignTitle={draft.title} eventFields={draft.eventFields} target="photo" focusLayerId={focusLayerId} onMediaEdit={(edit) => updatePhotoEdit(editingImage.id, edit)} onLayersChange={(textLayers) => setDraft((current) => ({ ...current, textLayers }))} onClose={() => { setEditingImageId(null); setFocusLayerId(""); }} />}
-        {editingCover && coverMedia && <CompositionEditor key={`cover-${coverMedia.id}-${focusLayerId}`} media={{ ...coverMedia, edit: draft.cover?.edit || coverMedia.edit }} template={activeCoverTemplate} layers={draft.textLayers} campaignTitle={draft.title} eventFields={draft.eventFields} target="cover" duotone={draft.cover?.duotone} focusLayerId={focusLayerId} onMediaEdit={(edit) => updateCover({ edit })} onLayersChange={(textLayers) => setDraft((current) => ({ ...current, textLayers }))} onClose={() => { setEditingCover(false); setFocusLayerId(""); }} />}
+        {editingImage && <CompositionEditor key={`photo-${editingImage.id}`} media={editingImage} template={activeTemplate} layers={draft.textLayers} campaignTitle={draft.title} eventFields={draft.eventFields} target="photo" onCampaignTitleChange={(title) => setDraft((current) => ({ ...current, title }))} onEventFieldsChange={(eventFields) => setDraft((current) => ({ ...current, eventFields }))} onMediaEdit={(edit) => updatePhotoEdit(editingImage.id, edit)} onLayersChange={(textLayers) => setDraft((current) => ({ ...current, textLayers }))} onClose={() => setEditingImageId(null)} />}
+        {editingCover && coverMedia && <CompositionEditor key={`cover-${coverMedia.id}`} media={{ ...coverMedia, edit: draft.cover?.edit || coverMedia.edit }} template={activeCoverTemplate} layers={draft.textLayers} campaignTitle={draft.title} eventFields={draft.eventFields} target="cover" duotone={draft.cover?.duotone} suggestedLayers={activeCoverTemplate?.suggestedLayers} onCampaignTitleChange={(title) => setDraft((current) => ({ ...current, title }))} onEventFieldsChange={(eventFields) => setDraft((current) => ({ ...current, eventFields }))} onDuotoneChange={(duotone) => updateCover({ duotone })} onMediaEdit={(edit) => updateCover({ edit })} onLayersChange={(textLayers) => setDraft((current) => ({ ...current, textLayers }))} onClose={() => setEditingCover(false)} />}
       </AnimatePresence>
     </motion.div>
-  );
-}
-
-function TypeIcon() {
-  return <span aria-hidden="true" className="type-icon">T</span>;
-}
-
-function StructuredTextField({ label, type = "text", value, placeholder, onChange, added, onAdd }) {
-  return (
-    <div className="structured-text-row">
-      <Field label={label}><input type={type} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} /></Field>
-      <button className="secondary-button" type="button" onClick={onAdd}><TypeIcon /> {added ? "Edit in design" : "Add to design"}</button>
-    </div>
   );
 }
 

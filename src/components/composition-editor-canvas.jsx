@@ -8,6 +8,7 @@ import {
   Check,
   Grid3X3,
   Image as ImageIcon,
+  Plus,
   Redo2,
   RefreshCcw,
   RotateCcw,
@@ -21,6 +22,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { clsx } from "clsx";
 import {
+  createTextLayer,
   duotonePalette,
   layerAppliesTo,
   normalizePhotoEdit,
@@ -38,7 +40,10 @@ export default function CompositionEditorCanvas({
   eventFields,
   target = "photo",
   duotone = "none",
-  focusLayerId = "",
+  suggestedLayers = [],
+  onCampaignTitleChange,
+  onEventFieldsChange,
+  onDuotoneChange,
   onMediaEdit,
   onLayersChange,
   onClose,
@@ -47,7 +52,7 @@ export default function CompositionEditorCanvas({
   const templateImage = useLoadedImage(template?.image);
   const [localEdit, setLocalEdit] = useState(() => normalizePhotoEdit(media?.edit));
   const [localLayers, setLocalLayers] = useState(() => (layers || []).map(normalizeTextLayer));
-  const [selectedId, setSelectedId] = useState(focusLayerId || "photo");
+  const [selectedId, setSelectedId] = useState("photo");
   const filteredSource = usePreparedImage(source, target === "cover" ? duotone : "none", localEdit.rotation);
   const [gridVisible, setGridVisible] = useState(true);
   const historyRef = useRef([]);
@@ -93,6 +98,31 @@ export default function CompositionEditorCanvas({
   }
   function updateLayer(id, changes, options) {
     commitLayers(localLayers.map((item) => item.id === id ? { ...item, ...changes } : item), options);
+  }
+  function addTextLayer(source) {
+    const existing = source === "custom" ? null : localLayers.find((layer) => (
+      layer.source === source && layerAppliesTo(layer, target, media?.id)
+    ));
+    if (existing) {
+      setSelectedId(existing.id);
+      return;
+    }
+    const scope = target === "cover" ? "cover" : "selected_photo";
+    let layer = createTextLayer(source, scope, target === "photo" ? media?.id : "");
+    const suggestion = target === "cover" ? suggestedLayers.find((item) => item.source === source) : null;
+    if (suggestion) layer = { ...layer, ...suggestion, id: layer.id, source, scope };
+    if (source === "custom") layer.text = "Custom text";
+    commitLayers([...localLayers, layer]);
+    setSelectedId(layer.id);
+  }
+  function updateLinkedValue(source, value) {
+    if (source === "campaign_title") {
+      onCampaignTitleChange?.(String(value).slice(0, 160));
+      return;
+    }
+    if (["date", "venue", "subtitle"].includes(source)) {
+      onEventFieldsChange?.({ ...eventFields, [source]: String(value).slice(0, 240) });
+    }
   }
   function undo() {
     const previous = historyRef.current.pop();
@@ -234,6 +264,14 @@ export default function CompositionEditorCanvas({
               </ResponsiveStage>
             </div>
 
+            <div className="composition-add-toolbar" role="toolbar" aria-label="Add text to design">
+              <span><Type size={16} /> Add text</span>
+              <button type="button" onClick={() => addTextLayer("campaign_title")}><Plus size={15} /> Title</button>
+              <button type="button" onClick={() => addTextLayer("date")}><Plus size={15} /> Date</button>
+              <button type="button" onClick={() => addTextLayer("venue")}><Plus size={15} /> Venue</button>
+              <button type="button" onClick={() => addTextLayer("subtitle")}><Plus size={15} /> Subtitle</button>
+              <button type="button" onClick={() => addTextLayer("custom")}><Plus size={15} /> Custom</button>
+            </div>
             <div className="composition-quick-toolbar" role="toolbar" aria-label="Design history and canvas tools">
               <button type="button" onClick={undo} disabled={!historyState.undo} aria-label="Undo"><Undo2 size={18} /><span>Undo</span></button>
               <button type="button" onClick={redo} disabled={!historyState.redo} aria-label="Redo"><Redo2 size={18} /><span>Redo</span></button>
@@ -249,6 +287,8 @@ export default function CompositionEditorCanvas({
                 layer={selectedLayer}
                 target={target}
                 mediaId={media?.id}
+                linkedValue={selectedLayer.source === "campaign_title" ? campaignTitle : eventFields?.[selectedLayer.source] || ""}
+                onLinkedValueChange={(value) => updateLinkedValue(selectedLayer.source, value)}
                 onChange={(changes) => updateLayer(selectedLayer.id, changes)}
                 onDelete={() => {
                   commitLayers(localLayers.filter((item) => item.id !== selectedLayer.id));
@@ -258,6 +298,9 @@ export default function CompositionEditorCanvas({
             ) : (
               <PhotoInspector
                 edit={localEdit}
+                target={target}
+                duotone={duotone}
+                onDuotoneChange={onDuotoneChange}
                 onChange={commitEdit}
                 onReset={() => commitEdit({ zoom: 1, positionX: 50, positionY: 50, rotation: 0 })}
               />
@@ -360,10 +403,20 @@ function EditableText({ layer, text, canvasWidth, canvasHeight, selected, onSele
   );
 }
 
-function PhotoInspector({ edit, onChange, onReset }) {
+function PhotoInspector({ edit, target, duotone, onDuotoneChange, onChange, onReset }) {
   return (
     <div className="inspector-stack">
       <div className="inspector-heading"><ImageIcon size={18} /><div><strong>Photo</strong><span>Move and crop the background image</span></div></div>
+      {target === "cover" && (
+        <div className="duotone-inspector">
+          <div><strong>Cover effect</strong><span>Choose an effect and see it immediately.</span></div>
+          <div className="duotone-options" role="group" aria-label="Cover color effect">
+            <button type="button" className={duotone === "cherry" ? "active" : ""} aria-pressed={duotone === "cherry"} onClick={() => onDuotoneChange?.("cherry")}><i className="cherry" /><span>Cherry</span></button>
+            <button type="button" className={duotone === "auto" ? "active" : ""} aria-pressed={duotone === "auto"} onClick={() => onDuotoneChange?.("auto")}><i className="auto" /><span>Auto</span></button>
+            <button type="button" className={duotone === "none" ? "active" : ""} aria-pressed={duotone === "none"} onClick={() => onDuotoneChange?.("none")}><i className="none" /><span>Original</span></button>
+          </div>
+        </div>
+      )}
       <div className="inspector-tool-row">
         <button type="button" onClick={() => onChange({ ...edit, zoom: clamp(edit.zoom - 0.1, 1, 3) })} disabled={edit.zoom <= 1}><ZoomOut size={18} /> Zoom out</button>
         <output>{Math.round(edit.zoom * 100)}%</output>
@@ -383,12 +436,17 @@ function PhotoInspector({ edit, onChange, onReset }) {
   );
 }
 
-function TextInspector({ layer, target, mediaId, onChange, onDelete }) {
+function TextInspector({ layer, target, mediaId, linkedValue, onLinkedValueChange, onChange, onDelete }) {
   return (
     <div className="inspector-stack">
       <div className="inspector-heading"><Type size={18} /><div><strong>{layerLabel(layer.source)}</strong><span>Plain text layer</span></div></div>
-      {layer.source === "custom" && (
+      {layer.source === "custom" ? (
         <label className="inspector-field"><span>Text</span><textarea rows={3} value={layer.text} onChange={(event) => onChange({ text: event.target.value.slice(0, 240) })} /></label>
+      ) : (
+        <label className="inspector-field">
+          <span>{layerLabel(layer.source)}</span>
+          <input type={layer.source === "date" ? "date" : "text"} value={linkedValue} onChange={(event) => onLinkedValueChange(event.target.value)} placeholder={linkedPlaceholder(layer.source)} />
+        </label>
       )}
       <label className="inspector-field">
         <span>Show on</span>
@@ -526,6 +584,14 @@ function layerLabel(source) {
     subtitle: "Subtitle",
     custom: "Custom text",
   }[source] || "Text";
+}
+
+function linkedPlaceholder(source) {
+  return {
+    campaign_title: "Campaign title",
+    venue: "Event venue",
+    subtitle: "Optional subtitle",
+  }[source] || "";
 }
 
 function hexToRgb(value) {
